@@ -63,5 +63,5 @@ type AccountPool interface {
 	GetAllUncommittedAccountBlocks() []*nom.AccountBlock
 	GetUncommittedAccountBlocksByAddress(address types.Address) []*nom.AccountBlock
 
-	CheckUncommittedPlasmaAmount(address types.Address) error
+	CheckUncommittedBlocksCount(address types.Address) error
 }
