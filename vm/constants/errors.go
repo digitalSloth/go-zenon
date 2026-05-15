@@ -99,6 +99,16 @@ var (
 	// revoked.
 	ErrNotActive = errors.New("pillar is not active")
 
+	// ErrVestedAppNotApproved rejects RegisterVested for an
+	// application that is not in the approved status.
+	ErrVestedAppNotApproved = errors.New("vested pillar application not approved")
+	// ErrVestedAppAlreadyExists rejects ApplyVestedPillar from an
+	// address that already has an application in voting or approved.
+	ErrVestedAppAlreadyExists = errors.New("vested pillar application already exists")
+	// ErrVestedAppExpired rejects RegisterVested after the approval
+	// grace period has passed.
+	ErrVestedAppExpired = errors.New("vested pillar application expired")
+
 	// ErrIDNotUnique rejects a token issuance whose derived token
 	// standard collides with an existing token.
 	ErrIDNotUnique = errors.New("there is another token with the same id")

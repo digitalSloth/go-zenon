@@ -122,6 +122,13 @@ var (
 	// bytes.
 	PillarNameLengthMax = 40
 
+	/// ==== Vested Pillar constants ===
+
+	VestedPillarApplicationFee                = new(big.Int).Set(PillarStakeAmount) // 15,000 ZNN — same as stake, since it converts
+	VestedPillarVotingPeriod            int64 = 14 * PhaseTimeUnit                  // 14 days
+	VestedPillarVoteAcceptanceThreshold       = uint32(50)                          // 50% — stricter than accelerator's 33%
+	VestedPillarApprovalGracePeriod     int64 = 30 * PhaseTimeUnit                  // 30 days to register after approval
+
 	/// === Sentinel constants ===
 
 	// SentinelZnnRegisterAmount is the ZNN amount (5,000 ZNN, in
