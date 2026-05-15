@@ -48,6 +48,28 @@ const (
 		{"type":"function","name":"Delegate", "inputs":[{"name":"name","type":"string"}]},
 		{"type":"function","name":"Undelegate","inputs":[]},
 		{"type":"function","name":"CollectReward","inputs":[]},
+		{"type":"function","name":"ApplyVestedPillar", "inputs":[
+			{"name":"title","type":"string"},
+			{"name":"description","type":"string"},
+			{"name":"url","type":"string"}
+		]},
+		{"type":"function","name":"RegisterVested", "inputs":[
+			{"name":"applicationId","type":"hash"},
+			{"name":"name","type":"string"},
+			{"name":"producerAddress","type":"address"},
+			{"name":"rewardAddress","type":"address"},
+			{"name":"giveBlockRewardPercentage","type":"uint8"},
+			{"name":"giveDelegateRewardPercentage","type":"uint8"}
+		]},
+		{"type":"function","name":"VoteByName","inputs":[
+			{"name":"id","type":"hash"},
+			{"name":"name","type":"string"},
+			{"name":"vote","type":"uint8"}
+		]},
+		{"type":"function","name":"VoteByProdAddress","inputs":[
+			{"name":"id","type":"hash"},
+			{"name":"vote","type":"uint8"}
+		]},
 
 		{"type":"variable","name":"pillarInfo","inputs":[
 			{"name":"name","type":"string"},
@@ -76,6 +98,16 @@ const (
 			{"name":"producedBlockNum","type":"int32"},
 			{"name":"expectedBlockNum","type":"int32"},
 			{"name":"weight","type":"uint256"}
+		]},
+		{"type":"variable","name":"vestedPillarApplication","inputs":[
+			{"name":"id","type":"hash"},
+			{"name":"applicant","type":"address"},
+			{"name":"title","type":"string"},
+			{"name":"description","type":"string"},
+			{"name":"url","type":"string"},
+			{"name":"creationTimestamp","type":"int64"},
+			{"name":"approvedTimestamp","type":"int64"},
+			{"name":"status","type":"uint8"}
 		]}
 	]`
 
@@ -84,8 +116,12 @@ const (
 
 	UpdatePillarMethodName = "UpdatePillar"
 	RevokeMethodName       = "Revoke"
-	DelegateMethodName     = "Delegate"
-	UndelegateMethodName   = "Undelegate"
+	DelegateMethodName       = "Delegate"
+	UndelegateMethodName     = "Undelegate"
+	ApplyVestedPillarMethodName = "ApplyVestedPillar"
+	RegisterVestedMethodName    = "RegisterVested"
+
+	VestedPillarApplicationVariableName = "vestedPillarApplication"
 
 	pillarInfoVariableName          = "pillarInfo"
 	producingPillarNameVariableName = "producingPillarName"
@@ -98,15 +134,24 @@ var (
 	// ABIPillars is abi definition of pillar contract
 	ABIPillars = abi.JSONToABIContract(strings.NewReader(jsonPillars))
 
-	pillarInfoKeyPrefix          = []byte{1}
-	producingPillarNameKeyPrefix = []byte{2}
-	legacyPillarEntryKeyPrefix   = []byte{3}
-	delegationInfoKeyPrefix      = []byte{4}
-	pillarEpochHistoryKeyPrefix  = []byte{5}
+	pillarInfoKeyPrefix               = []byte{1}
+	producingPillarNameKeyPrefix      = []byte{2}
+	legacyPillarEntryKeyPrefix        = []byte{3}
+	delegationInfoKeyPrefix           = []byte{4}
+	pillarEpochHistoryKeyPrefix       = []byte{5}
+	vestedPillarApplicationKeyPrefix  = []byte{6}
 
 	AnyPillarType    = uint8(0)
 	LegacyPillarType = uint8(1)
 	NormalPillarType = uint8(2)
+	VestedPillarType = uint8(3)
+
+	// Vested application statuses
+	VestedApplicationVotingStatus    = uint8(0)
+	VestedApplicationApprovedStatus  = uint8(1)
+	VestedApplicationRejectedStatus  = uint8(2)
+	VestedApplicationRegisteredStatus = uint8(3)
+	VestedApplicationExpiredStatus   = uint8(4)
 )
 
 type RegisterParam struct {
@@ -120,6 +165,96 @@ type LegacyRegisterParam struct {
 	RegisterParam
 	PublicKey string
 	Signature string
+}
+
+type VestedApplyParam struct {
+	Title       string
+	Description string
+	Url         string
+}
+
+type RegisterVestedParam struct {
+	ApplicationId types.Hash
+	RegisterParam
+}
+
+type VestedPillarApplication struct {
+	Id                types.Hash    `json:"id"`
+	Applicant         types.Address `json:"applicant"`
+	Title             string        `json:"title"`
+	Description       string        `json:"description"`
+	Url               string        `json:"url"`
+	CreationTimestamp  int64         `json:"creationTimestamp"`
+	ApprovedTimestamp  int64         `json:"approvedTimestamp"`
+	Status            uint8         `json:"status"`
+}
+
+func (app *VestedPillarApplication) Save(context db.DB) error {
+	data, err := ABIPillars.PackVariable(
+		VestedPillarApplicationVariableName,
+		app.Id,
+		app.Applicant,
+		app.Title,
+		app.Description,
+		app.Url,
+		app.CreationTimestamp,
+		app.ApprovedTimestamp,
+		app.Status,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(app.Key(), data)
+}
+
+func (app *VestedPillarApplication) Delete(context db.DB) error {
+	return context.Delete(app.Key())
+}
+
+func (app *VestedPillarApplication) Key() []byte {
+	return common.JoinBytes(vestedPillarApplicationKeyPrefix, app.Id.Bytes())
+}
+
+func parseVestedPillarApplication(data []byte) (*VestedPillarApplication, error) {
+	if len(data) > 0 {
+		app := new(VestedPillarApplication)
+		if err := ABIPillars.UnpackVariable(app, VestedPillarApplicationVariableName, data); err != nil {
+			return nil, err
+		}
+		return app, nil
+	}
+	return nil, constants.ErrDataNonExistent
+}
+
+func GetVestedPillarApplication(context db.DB, id types.Hash) (*VestedPillarApplication, error) {
+	key := common.JoinBytes(vestedPillarApplicationKeyPrefix, id.Bytes())
+	if data, err := context.Get(key); err != nil {
+		return nil, err
+	} else {
+		return parseVestedPillarApplication(data)
+	}
+}
+
+func IterateVestedPillarApplications(context db.DB) ([]*VestedPillarApplication, error) {
+	iterator := context.NewIterator(vestedPillarApplicationKeyPrefix)
+	defer iterator.Release()
+	list := make([]*VestedPillarApplication, 0)
+	for {
+		if !iterator.Next() {
+			if iterator.Error() != nil {
+				return nil, iterator.Error()
+			}
+			break
+		}
+		if app, err := parseVestedPillarApplication(iterator.Value()); err == nil {
+			list = append(list, app)
+		} else if err == constants.ErrDataNonExistent {
+			continue
+		} else {
+			return nil, err
+		}
+	}
+	return list, nil
 }
 
 type PillarInfo struct {

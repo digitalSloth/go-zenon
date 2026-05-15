@@ -139,6 +139,11 @@ func getOrigin() map[types.Address]*embeddedImplementation {
 				cabi.DepositQsrMethodName:    &implementation.DepositQsrMethod{MethodName: cabi.DepositQsrMethodName},
 				cabi.WithdrawQsrMethodName:   &implementation.WithdrawQsrMethod{MethodName: cabi.WithdrawQsrMethodName},
 				cabi.CollectRewardMethodName: &implementation.CollectRewardMethod{MethodName: cabi.CollectRewardMethodName, Plasma: constants.AlphanetPlasmaTable.EmbeddedSimple + constants.AlphanetPlasmaTable.EmbeddedWWithdraw},
+				// vested pillar
+				cabi.ApplyVestedPillarMethodName: &implementation.ApplyVestedPillarMethod{MethodName: cabi.ApplyVestedPillarMethodName},
+				cabi.RegisterVestedMethodName:    &implementation.RegisterVestedMethod{MethodName: cabi.RegisterVestedMethodName},
+				cabi.VoteByNameMethodName:        &implementation.VoteByNameMethod{MethodName: cabi.VoteByNameMethodName},
+				cabi.VoteByProdAddressMethodName: &implementation.VoteByProdAddressMethod{MethodName: cabi.VoteByProdAddressMethodName},
 			},
 			cabi.ABIPillars,
 		},

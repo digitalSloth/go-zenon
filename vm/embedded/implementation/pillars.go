@@ -60,6 +60,23 @@ func checkPillarPercentages(param *definition.RegisterParam) error {
 	return nil
 }
 
+func checkVestedApplicationMetaData(param *definition.VestedApplyParam) error {
+	if len(param.Title) == 0 ||
+		len(param.Title) > constants.ProjectNameLengthMax {
+		return constants.ErrInvalidName
+	}
+
+	if len(param.Description) == 0 || len(param.Description) > constants.ProjectDescriptionLengthMax {
+		return constants.ErrInvalidDescription
+	}
+
+	if ok, _ := regexp.MatchString("^([Hh][Tt][Tt][Pp][Ss]?://)?[a-zA-Z0-9]{2,60}\\.[a-zA-Z]{1,6}([-a-zA-Z0-9()@:%_+.~#?&/=]{0,100})$", param.Url); !ok || len(param.Url) == 0 {
+		return constants.ErrForbiddenParam
+	}
+
+	return nil
+}
+
 // Used for registration
 // - checks the validity of pillar information
 // - registers pillar and producing address in DB
@@ -282,6 +299,139 @@ func (p *LegacyRegisterMethod) ReceiveBlock(context vm_context.AccountVmContext,
 			Data:          definition.ABIToken.PackMethodPanic(definition.BurnMethodName),
 		},
 	}, nil
+}
+
+type ApplyVestedPillarMethod struct {
+	MethodName string
+}
+
+func (p *ApplyVestedPillarMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *ApplyVestedPillarMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(definition.VestedApplyParam)
+
+	if err := definition.ABIPillars.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if err := checkVestedApplicationMetaData(param); err != nil {
+		return err
+	}
+
+	if block.TokenStandard != types.ZnnTokenStandard || block.Amount.Cmp(constants.VestedPillarApplicationFee) != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABIPillars.PackMethod(p.MethodName, param.Title, param.Description, param.Url)
+	return err
+}
+func (p *ApplyVestedPillarMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(definition.VestedApplyParam)
+	err := definition.ABIPillars.UnpackMethod(param, p.MethodName, sendBlock.Data)
+	common.DealWithErr(err)
+
+	// Check applicant doesn't already have an open application
+	appList, err := definition.IterateVestedPillarApplications(context.Storage())
+	common.DealWithErr(err)
+	for _, existingApp := range appList {
+		if existingApp.Applicant == sendBlock.Address &&
+			(existingApp.Status == definition.VestedApplicationVotingStatus || existingApp.Status == definition.VestedApplicationApprovedStatus) {
+			return nil, constants.ErrVestedAppAlreadyExists
+		}
+	}
+
+	frontierMomentum, err := context.GetFrontierMomentum()
+	common.DealWithErr(err)
+
+	app := &definition.VestedPillarApplication{
+		Id:               sendBlock.Hash,
+		Applicant:        sendBlock.Address,
+		Title:            param.Title,
+		Description:      param.Description,
+		Url:              param.Url,
+		CreationTimestamp: frontierMomentum.Timestamp.Unix(),
+		ApprovedTimestamp: 0,
+		Status:           definition.VestedApplicationVotingStatus,
+	}
+	common.DealWithErr(app.Save(context.Storage()))
+
+	// Add hash to votable hashes so pillars can vote on it
+	(&definition.VotableHash{Id: sendBlock.Hash}).Save(context.Storage())
+
+	pillarLog.Debug("successfully submitted vested pillar application", "id", app.Id, "applicant", app.Applicant)
+	return nil, nil
+}
+
+type RegisterVestedMethod struct {
+	MethodName string
+}
+
+func (p *RegisterVestedMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return 2 * plasmaTable.EmbeddedSimple, nil
+}
+func (p *RegisterVestedMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	param := new(definition.RegisterVestedParam)
+
+	if err := definition.ABIPillars.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if err := checkPillarNameStatic(param.Name); err != nil {
+		return err
+	}
+	if err := checkPillarPercentages(&param.RegisterParam); err != nil {
+		return err
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	var err error
+	block.Data, err = definition.ABIPillars.PackMethod(p.MethodName, param.ApplicationId, param.Name, param.ProducerAddress, param.RewardAddress, param.GiveBlockRewardPercentage, param.GiveDelegateRewardPercentage)
+	return err
+}
+func (p *RegisterVestedMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	param := new(definition.RegisterVestedParam)
+	err := definition.ABIPillars.UnpackMethod(param, p.MethodName, sendBlock.Data)
+	common.DealWithErr(err)
+
+	app, err := definition.GetVestedPillarApplication(context.Storage(), param.ApplicationId)
+	if err != nil {
+		return nil, constants.ErrDataNonExistent
+	}
+
+	if app.Status != definition.VestedApplicationApprovedStatus {
+		return nil, constants.ErrVestedAppNotApproved
+	}
+
+	if sendBlock.Address != app.Applicant {
+		return nil, constants.ErrPermissionDenied
+	}
+
+	frontierMomentum, err := context.GetFrontierMomentum()
+	common.DealWithErr(err)
+
+	if frontierMomentum.Timestamp.Unix() >= app.ApprovedTimestamp+constants.VestedPillarApprovalGracePeriod {
+		return nil, constants.ErrVestedAppExpired
+	}
+
+	if err := checkAndRegisterPillar(context, &param.RegisterParam, sendBlock.Address, definition.VestedPillarType); err != nil {
+		return nil, err
+	}
+
+	// Mark application as registered (kept for audit)
+	app.Status = definition.VestedApplicationRegisteredStatus
+	common.DealWithErr(app.Save(context.Storage()))
+
+	pillarLog.Debug("successfully registered vested pillar", "name", param.Name, "applicant", sendBlock.Address)
+	return nil, nil
 }
 
 type RevokeMethod struct {
@@ -756,6 +906,84 @@ func (p *UndelegateMethod) ReceiveBlock(context vm_context.AccountVmContext, sen
 	return nil, nil
 }
 
+func checkVestedPillarVotes(context vm_context.AccountVmContext, id types.Hash, numPillars int) bool {
+	breakdown := definition.GetVoteBreakdown(context.Storage(), id)
+	if breakdown.Yes <= breakdown.No {
+		return false
+	}
+	if breakdown.Total*100 <= uint32(numPillars)*constants.VestedPillarVoteAcceptanceThreshold {
+		return false
+	}
+	return true
+}
+
+func updateVestedApplications(context vm_context.AccountVmContext) ([]*nom.AccountBlock, error) {
+	frontierMomentum, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	now := frontierMomentum.Timestamp.Unix()
+
+	activePillars, err := context.MomentumStore().GetActivePillars()
+	if err != nil {
+		return nil, err
+	}
+	numPillars := len(activePillars)
+
+	appList, err := definition.IterateVestedPillarApplications(context.Storage())
+	if err != nil {
+		return nil, err
+	}
+
+	var blocks []*nom.AccountBlock
+	for _, app := range appList {
+		switch app.Status {
+		case definition.VestedApplicationVotingStatus:
+			if now < app.CreationTimestamp+constants.VestedPillarVotingPeriod {
+				continue // still voting
+			}
+			// Voting period ended — tally votes
+			if checkVestedPillarVotes(context, app.Id, numPillars) {
+				app.Status = definition.VestedApplicationApprovedStatus
+				app.ApprovedTimestamp = now
+				common.DealWithErr(app.Save(context.Storage()))
+				// Remove votable hash since voting is closed
+				(&definition.VotableHash{Id: app.Id}).Delete(context.Storage())
+				pillarLog.Debug("vested pillar application approved", "id", app.Id, "applicant", app.Applicant)
+			} else {
+				app.Status = definition.VestedApplicationRejectedStatus
+				common.DealWithErr(app.Save(context.Storage()))
+				(&definition.VotableHash{Id: app.Id}).Delete(context.Storage())
+				// Refund 15k ZNN
+				blocks = append(blocks, &nom.AccountBlock{
+					Address:       types.PillarContract,
+					ToAddress:     app.Applicant,
+					BlockType:     nom.BlockTypeContractSend,
+					Amount:        constants.VestedPillarApplicationFee,
+					TokenStandard: types.ZnnTokenStandard,
+				})
+				pillarLog.Debug("vested pillar application rejected", "id", app.Id, "applicant", app.Applicant)
+			}
+
+		case definition.VestedApplicationApprovedStatus:
+			if now >= app.ApprovedTimestamp+constants.VestedPillarApprovalGracePeriod {
+				app.Status = definition.VestedApplicationExpiredStatus
+				common.DealWithErr(app.Save(context.Storage()))
+				// Refund 15k ZNN
+				blocks = append(blocks, &nom.AccountBlock{
+					Address:       types.PillarContract,
+					ToAddress:     app.Applicant,
+					BlockType:     nom.BlockTypeContractSend,
+					Amount:        constants.VestedPillarApplicationFee,
+					TokenStandard: types.ZnnTokenStandard,
+				})
+				pillarLog.Debug("vested pillar application expired", "id", app.Id, "applicant", app.Applicant)
+			}
+		}
+	}
+	return blocks, nil
+}
+
 type UpdateEmbeddedPillarMethod struct {
 	MethodName string
 }
@@ -789,5 +1017,10 @@ func (p *UpdateEmbeddedPillarMethod) ReceiveBlock(context vm_context.AccountVmCo
 	if err := updatePillarRewards(context); err != nil {
 		return nil, err
 	}
-	return nil, nil
+
+	vestedBlocks, err := updateVestedApplications(context)
+	if err != nil {
+		return nil, err
+	}
+	return vestedBlocks, nil
 }

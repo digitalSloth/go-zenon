@@ -35,6 +35,11 @@ var (
 	ErrNotUnique   = errors.New("name or producing address not unique")
 	ErrNotActive   = errors.New("pillar is not active")
 
+	// Vested Pillar
+	ErrVestedAppNotApproved   = errors.New("vested pillar application not approved")
+	ErrVestedAppAlreadyExists = errors.New("vested pillar application already exists")
+	ErrVestedAppExpired       = errors.New("vested pillar application expired")
+
 	// Token
 	ErrIDNotUnique        = errors.New("there is another token with the same id")
 	ErrTokenInvalidText   = errors.New("invalid token name/symbol/domain/decimals")
