@@ -11,7 +11,7 @@ import (
 
 	"github.com/zenon-network/go-zenon/chain/genesis"
 	"github.com/zenon-network/go-zenon/common/types"
-	"github.com/zenon-network/go-zenon/p2p/discover"
+	"github.com/zenon-network/go-zenon/p2p"
 	"github.com/zenon-network/go-zenon/wallet"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -143,23 +143,26 @@ func run(force bool) error {
 		}
 	}
 
-	// Pass 2: load each p2p key, build the seeder list off the bootstrap pillar.
-	enodes := make(map[string]string, len(pillars))
-	var bootstrapEnode string
+	// Pass 2: load each p2p key, build multiaddr seeder list off the bootstrap pillar.
+	maddrs := make(map[string]string, len(pillars))
+	var bootstrapMaddr string
 	for _, p := range pillars {
 		k, err := crypto.LoadECDSA(filepath.Join(p.Dir, "network-private-key"))
 		if err != nil {
 			return fmt.Errorf("load p2p key for %s: %w", p.Role, err)
 		}
-		// Seeder parsing in p2p/discover requires a numeric IP, not a hostname,
-		// so we point at the static IPs reserved in docker-compose.yml.
-		enode := fmt.Sprintf("enode://%s@%s:35995", discover.PubkeyID(&k.PublicKey).String(), p.IP)
-		enodes[p.Role] = enode
+		// Derive libp2p peer ID from the ECDSA key
+		pid, err := p2p.PeerIDFromECDSA(k)
+		if err != nil {
+			return fmt.Errorf("derive peer ID for %s: %w", p.Role, err)
+		}
+		maddr := fmt.Sprintf("/ip4/%s/tcp/35995/p2p/%s", p.IP, pid)
+		maddrs[p.Role] = maddr
 		if p.IsBootstrap {
-			bootstrapEnode = enode
+			bootstrapMaddr = maddr
 		}
 	}
-	if bootstrapEnode == "" {
+	if bootstrapMaddr == "" {
 		return fmt.Errorf("no bootstrap pillar configured")
 	}
 
@@ -169,7 +172,7 @@ func run(force bool) error {
 		seeders := []string{}
 		minPeers := 0
 		if !p.IsBootstrap {
-			seeders = []string{bootstrapEnode}
+			seeders = []string{bootstrapMaddr}
 			minPeers = 1
 		}
 		cfgPath := filepath.Join(p.Dir, "config.json")
@@ -177,7 +180,7 @@ func run(force bool) error {
 			return err
 		}
 	}
-	if err := writeRPCConfig(bootstrapEnode); err != nil {
+	if err := writeRPCConfig(bootstrapMaddr); err != nil {
 		return err
 	}
 
@@ -198,7 +201,7 @@ func run(force bool) error {
 	}
 	fmt.Println()
 	for _, p := range pillars {
-		fmt.Printf("%s enode: %s\n", p.Role, enodes[p.Role])
+		fmt.Printf("%s multiaddr: %s\n", p.Role, maddrs[p.Role])
 	}
 	return nil
 }
