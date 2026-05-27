@@ -1,4 +1,4 @@
-.PHONY: all clean znnd devnet-keys devnet-up devnet-down
+.PHONY: all clean znnd devnet-keys devnet-up devnet-down devnet-down-wipe
 
 GO ?= latest
 
@@ -47,4 +47,7 @@ devnet-up:
 	docker compose up -d --build
 
 devnet-down:
+	docker compose down
+
+devnet-down-wipe:
 	docker compose down -v

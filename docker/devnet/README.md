@@ -39,13 +39,17 @@ proposals.
 ## Bring it up
 
 ```sh
-make devnet-up      # docker compose up -d --build
-make devnet-down    # docker compose down -v   (wipes chain state)
+make devnet-up          # docker compose up -d --build
+make devnet-down        # docker compose down        (keeps chain state)
+make devnet-down-wipe   # docker compose down -v     (wipes chain state)
 ```
 
-`down -v` is the reset button — the next `up` reproduces the same
-genesis hash because keystores, network-private-keys, `genesis.json`,
-and configs are all committed under `docker/devnet/`.
+`devnet-down-wipe` is the reset button — the next `up` reproduces the
+same genesis hash because keystores, network-private-keys,
+`genesis.json`, and configs are all committed under `docker/devnet/`.
+
+Use `devnet-down` to stop without losing chain state (e.g., to keep
+an activated spork between restarts).
 
 ## RPC endpoints
 

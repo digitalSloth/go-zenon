@@ -4,8 +4,31 @@ var (
 	AcceleratorSpork        = NewImplementedSpork("6d2b1e6cb4025f2f45533f0fe22e9b7ce2014d91cc960471045fa64eee5a6ba3")
 	HtlcSpork               = NewImplementedSpork("ceb7e3808ef17ea910adda2f3ab547be4cdfb54de8400ce3683258d06be1354b")
 	BridgeAndLiquiditySpork = NewImplementedSpork("ddd43466769461c5b5d109c639da0f50a7eeb96ad6e7274b1928a35c431d7b1b")
-	// TODO: Change spork
-	DynamicPlasmaSpork = NewImplementedSpork("36ab0d2b752bd6e02d07e815ce32d3fe71cf11ee9834dfa0322022734184c8a8")
+	// DynamicPlasmaSpork gates the activation of the dynamic plasma pricing
+	// model. Until this spork's EnforcementHeight is reached, the legacy
+	// fixed-price plasma model is in use; at activation, momentums switch
+	// to version 2 with adaptive fusion/work prices.
+	//
+	// PLACEHOLDER HASH. Sporks are identified by the hash of their
+	// CreateSpork transaction, which is deterministic from the tx
+	// contents and therefore not known until governance broadcasts the
+	// proposal. The release flow is:
+	//
+	//  1. Ship this binary with the placeholder. No on-chain spork can
+	//     match it, so IsSporkActive always returns false and the
+	//     network stays on fixed-price plasma. Safe-by-default.
+	//  2. Governance broadcasts the CreateSpork tx. The resulting
+	//     send-block hash is the real SporkId.
+	//  3. Replace the placeholder with that hash, release a new binary,
+	//     coordinate the operator upgrade campaign.
+	//  4. Governance broadcasts ActivateSpork. After
+	//     SporkMinHeightDelay momentums, EnforcementHeight passes and
+	//     every node enforces dynamic plasma consensus rules.
+	//
+	// Tests and devnet override ImplementedSporksMap at runtime with
+	// the locally-generated hash (see vm/embedded/tests/dp_test.go
+	// for the existing pattern).
+	DynamicPlasmaSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000001")
 
 	ImplementedSporksMap = map[Hash]bool{
 		AcceleratorSpork.SporkId:        true,
