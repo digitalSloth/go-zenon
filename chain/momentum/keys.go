@@ -8,4 +8,5 @@ var (
 	blockConfirmationHeightPrefix = []byte{5}
 	accountZNNBalancePrefix       = []byte{8}
 	accountHeaderByHashPrefix     = []byte{9}
+	wasmPendingPrefix             = []byte{10}
 )

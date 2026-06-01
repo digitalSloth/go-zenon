@@ -204,7 +204,7 @@ func (rmv *rawMomentumVerifier) content(isDynamicPlasmaActive bool) error {
 		contractBlockCount := uint64(0)
 		basePlasma := types.BasePlasma{Fusion: 0, Pow: 0}
 		for _, block := range rmv.accountBlocks {
-			if types.IsEmbeddedAddress(block.Address) {
+			if types.IsContractAddress(block.Address) {
 				contractBlockCount++
 				if contractBlockCount > plasma.MaxContractBlocksInMomentum() {
 					return errors.Errorf("exceeded maximum allowed contract account blocks in momentum")

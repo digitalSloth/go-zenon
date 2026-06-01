@@ -118,21 +118,26 @@ func AvailablePlasmaV2(momentum store.Momentum, account store.Account) (uint64, 
 
 // GetBasePlasmaForAccountBlock calculates the smallest plasma required for an account block.
 func GetBasePlasmaForAccountBlock(context vm_context.AccountVmContext, block *nom.AccountBlock) (uint64, error) {
-	if types.IsEmbeddedAddress(block.Address) {
+	if types.IsContractAddress(block.Address) {
 		return 0, nil
 	}
 	if block.IsReceiveBlock() {
 		return constants.AccountBlockBasePlasma, nil
-	} else {
-		if method, err := embedded.GetEmbeddedMethod(context, block.ToAddress, block.Data); err == constants.ErrNotContractAddress {
-			if len(block.Data) > constants.MaxDataLength {
-				return 0, verifier.ErrABDataTooBig
-			}
-			return uint64(len(block.Data)*constants.ABByteDataPlasma + constants.AccountBlockBasePlasma), nil
-		} else if err != nil {
-			return 0, err
-		} else {
-			return method.GetPlasma(&constants.AlphanetPlasmaTable)
+	}
+
+	// 0x02 destination with empty Data is a plain token transfer
+	if types.IsWasmContractAddress(block.ToAddress) && len(block.Data) == 0 {
+		return constants.AccountBlockBasePlasma, nil
+	}
+
+	if method, err := embedded.GetEmbeddedMethod(context, block.ToAddress, block.Data); err == constants.ErrNotContractAddress {
+		if len(block.Data) > constants.MaxDataLength {
+			return 0, verifier.ErrABDataTooBig
 		}
+		return uint64(len(block.Data)*constants.ABByteDataPlasma + constants.AccountBlockBasePlasma), nil
+	} else if err != nil {
+		return 0, err
+	} else {
+		return method.GetPlasma(&constants.AlphanetPlasmaTable)
 	}
 }

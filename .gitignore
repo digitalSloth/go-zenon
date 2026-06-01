@@ -8,7 +8,11 @@
 
 build/
 devnet-keygen
+docker/demos/wasm/bin
 
 # IDE
 .vscode
 .idea/
+
+# Notes
+docs/notes/

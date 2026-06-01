@@ -131,11 +131,14 @@ func (s *Supervisor) GenerateAutoReceive(sendBlock *nom.AccountBlock) (*Contract
 	}
 	vm := NewVM(context)
 	block, methodErr, err := vm.generateEmbeddedReceive(template.FromBlockHash)
-	if err := s.verifier.AccountBlock(block); err != nil {
+	// A fatal (third) error means no block was produced (block == nil) — e.g. the
+	// wall-clock watchdog tripped. Check it before touching `block`, otherwise the
+	// verifier dereferences nil. This also ensures a non-deterministic watchdog
+	// trip aborts production rather than emitting a block.
+	if err != nil {
 		return nil, err
 	}
-
-	if err != nil {
+	if err := s.verifier.AccountBlock(block); err != nil {
 		return nil, err
 	}
 	transaction, err := s.packBlock(context, block, nil)
@@ -347,7 +350,7 @@ func (s *Supervisor) setBlockMomentum(block *nom.AccountBlock) error {
 		return err
 	}
 	if block.MomentumAcknowledged.IsZero() {
-		if types.IsEmbeddedAddress(block.Address) {
+		if types.IsContractAddress(block.Address) {
 			confirmation, err := store.GetBlockConfirmationHeight(block.FromBlockHash)
 			if err != nil {
 				return err

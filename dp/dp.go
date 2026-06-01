@@ -97,7 +97,7 @@ func (dp *dynamicPlasma) nextResourcePrice(currentPrice uint64, usedPlasma uint6
 // Calculates nominal base plasma values for fused plasma and PoW plasma. These nominal base plasma
 // values are used to account for and control the amount of network bandwidth paid for by the two plasma resources.
 func (dp *dynamicPlasma) ComputeBasePlasma(block *nom.AccountBlock) types.BasePlasma {
-	if types.IsEmbeddedAddress(block.Address) {
+	if types.IsContractAddress(block.Address) {
 		return types.NewBasePlasma(0, 0)
 	}
 
@@ -139,7 +139,7 @@ func (dp *dynamicPlasma) ComputeTotalBasePlasma(blocks []*nom.AccountBlock) type
 }
 
 func (dp *dynamicPlasma) ValidPrice(block *nom.AccountBlock) bool {
-	if types.IsEmbeddedAddress(block.Address) {
+	if types.IsContractAddress(block.Address) {
 		return true
 	}
 	minimumPricedBlock := &nom.AccountBlock{

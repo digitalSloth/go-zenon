@@ -28,3 +28,9 @@ func (ctx *accountVmContext) IsDynamicPlasmaSporkEnforced() bool {
 	common.DealWithErr(err)
 	return active
 }
+
+func (ctx *accountVmContext) IsWasmRuntimeSporkEnforced() bool {
+	active, err := ctx.momentumStore.IsWasmRuntimeSporkEnforced()
+	common.DealWithErr(err)
+	return active
+}

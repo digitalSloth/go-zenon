@@ -125,6 +125,8 @@ func (w *worker) work(task common.TaskResolver, e consensus.ProducerEvent) {
 	momentumStore = w.chain.GetFrontierMomentumStore()
 	for {
 		one := false
+
+		// Embedded contracts (0x01)
 		for _, contractAddress := range w.contracts {
 			if task.ShouldStop() {
 				return
@@ -146,6 +148,35 @@ func (w *worker) work(task common.TaskResolver, e consensus.ProducerEvent) {
 
 			one = true
 		}
+
+		// Deployed WASM contracts (0x02) — populated by the wasmPendingAddresses index
+		wasmPending, err := momentumStore.GetWasmPendingAddresses()
+		if err != nil {
+			w.log.Error("failed to get wasm pending addresses", "reason", err)
+			return
+		}
+		for _, wasmAddr := range wasmPending {
+			if task.ShouldStop() {
+				return
+			}
+			if w.shouldStop() {
+				return
+			}
+
+			transaction, err := w.generateNext(momentumStore, wasmAddr)
+			if err == ErrNothingToGenerate {
+				continue
+			}
+			if err != nil {
+				w.log.Error("unable to generate receive block for wasm contract", "reason", err)
+				return
+			}
+			w.broadcaster.CreateAccountBlock(transaction)
+			w.log.Info("created autoreceive-block", "identifier", transaction.Block.Header())
+
+			one = true
+		}
+
 		if !one {
 			break
 		}

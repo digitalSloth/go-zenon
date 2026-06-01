@@ -29,12 +29,19 @@ var (
 	// the locally-generated hash (see vm/embedded/tests/dp_test.go
 	// for the existing pattern).
 	DynamicPlasmaSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000001")
+	// WasmRuntimeSpork gates the WebAssembly smart contract runtime.
+	// Requires DynamicPlasmaSpork to be enforced first.
+	//
+	// PLACEHOLDER HASH — same release flow as DynamicPlasmaSpork.
+	// See spork.go DynamicPlasmaSpork comment for the full lifecycle.
+	WasmRuntimeSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000003")
 
 	ImplementedSporksMap = map[Hash]bool{
 		AcceleratorSpork.SporkId:        true,
 		HtlcSpork.SporkId:               true,
 		BridgeAndLiquiditySpork.SporkId: true,
 		DynamicPlasmaSpork.SporkId:      true,
+		WasmRuntimeSpork.SporkId:        true,
 	}
 )
 

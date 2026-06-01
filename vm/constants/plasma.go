@@ -11,6 +11,10 @@ type PlasmaTable struct {
 	EmbeddedSimple          uint64
 	EmbeddedWWithdraw       uint64
 	EmbeddedWDoubleWithdraw uint64
+
+	// WASM plasma costs
+	EmbeddedWasmDeploy  uint64
+	EmbeddedWasmExecute uint64
 }
 
 var (
@@ -21,6 +25,8 @@ var (
 		EmbeddedSimple:          EmbeddedSimplePlasma,
 		EmbeddedWWithdraw:       EmbeddedWResponse,
 		EmbeddedWDoubleWithdraw: EmbeddedWDoubleResponse,
+		EmbeddedWasmDeploy:      EmbeddedWasmDeploy,
+		EmbeddedWasmExecute:     EmbeddedWasmExecute,
 	}
 )
 
@@ -31,6 +37,9 @@ const (
 	EmbeddedSimplePlasma    = 2.5 * AccountBlockBasePlasma
 	EmbeddedWResponse       = 3.5 * AccountBlockBasePlasma
 	EmbeddedWDoubleResponse = 4.5 * AccountBlockBasePlasma
+
+	EmbeddedWasmDeploy  = 10 * AccountBlockBasePlasma // 210,000
+	EmbeddedWasmExecute = 5 * AccountBlockBasePlasma  // 105,000
 
 	NumFusionUnitsForBasePlasma = 10
 	PlasmaPerFusionUnit         = AccountBlockBasePlasma / NumFusionUnitsForBasePlasma

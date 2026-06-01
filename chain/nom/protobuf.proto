@@ -34,6 +34,15 @@ message AccountBlockProto {
 
   bytes publicKey = 22;
   bytes signature = 23;
+  // Added with WasmRuntimeSpork — WASM events emitted during contract execution.
+  repeated WasmEventProto events = 24;
+}
+
+message WasmEventProto {
+  bytes contractAddress = 1;
+  bytes topic = 2;
+  bool indexed = 3;
+  bytes data = 4;
 }
 
 message MomentumProto {

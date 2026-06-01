@@ -8,15 +8,17 @@ import (
 )
 
 type Method struct {
-	Name   string
-	id     []byte
-	Inputs Arguments
+	Name    string
+	id      []byte
+	Inputs  Arguments
+	Outputs Arguments
 }
 
-func newMethod(name string, inputs Arguments) Method {
+func newMethod(name string, inputs Arguments, outputs Arguments) Method {
 	m := Method{
-		Name:   name,
-		Inputs: inputs,
+		Name:    name,
+		Inputs:  inputs,
+		Outputs: outputs,
 	}
 	m.id = types.NewHash([]byte(m.Sig())).Bytes()[:4]
 	return m

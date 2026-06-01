@@ -1,10 +1,11 @@
 package constants
 
 import (
-	"github.com/zenon-network/go-zenon/common/types"
 	"math/big"
+	"time"
 
 	"github.com/zenon-network/go-zenon/common"
+	"github.com/zenon-network/go-zenon/common/types"
 )
 
 const (
@@ -94,6 +95,7 @@ var (
 	/// === Bridge constants ===
 
 	InitialBridgeAdministrator   = types.ParseAddressPanic("z1qr9vtwsfr2n0nsxl2nfh6l5esqjh2wfj85cfq9")
+	InitialWasmAdministrator     = types.GovernanceAddress
 	MaximumFee                   = uint32(10000)
 	MinUnhaltDurationInMomentums = uint64(6 * MomentumsPerHour)  //main net
 	MinAdministratorDelay        = uint64(2 * MomentumsPerEpoch) // main net
@@ -103,6 +105,55 @@ var (
 	DecompressedECDSAPubKeyLength = 65
 	CompressedECDSAPubKeyLength   = 33
 	ECDSASignatureLength          = 65
+
+	/// === WASM Runtime constants ===
+
+	WasmExecutionGasLimit = 250_000
+	WasmOnReceiveGasLimit = 25_000
+	WasmWallClockLimit    = 1 * time.Second
+	// WasmAccountBlockVersion is defined in chain/nom (nom.WasmAccountBlockVersion).
+	MaxDescendantBlocksPerExecute = 16
+	MaxWasmBytecodeSize           = 14 * 1024
+	MaxChunkCount                 = 18
+	MaxArgsBytes                  = 15_800
+	MaxEventsPerExecute           = 256
+	MaxEventBytesPerExecute       = 65_536
+	MaxEventDataPerEvent          = 4096
+	// WasmMaxViewReturnSize caps the length-prefixed return buffer a view call
+	// (§11.3) copies out of guest memory, bounding RPC memory use against a
+	// malicious length header. Mirrors the per-execute event byte cap (64 KiB).
+	WasmMaxViewReturnSize  = 65_536
+	QSRPerByteOfBytecode   = 500
+	QSRPerByteOfState      = 1000
+	MinBytecodeCost        = 100_000_000  // 1 QSR
+	ZNNDeployFee           = 1 * Decimals // 1 ZNN, burned at Activate
+	ChunkTTLMomentums      = 1440
+	WasmAdministratorDelay = uint64(1440)
+
+	// WASM host function gas costs
+	WasmGasStateRead        = 200
+	WasmGasStateWrite       = 5000
+	WasmGasStateDelete      = 500
+	WasmGasStateHas         = 200
+	WasmGasBalanceGet       = 200
+	WasmGasTransfer         = 9000
+	WasmGasGetHeight        = 50
+	WasmGasGetTimestamp     = 50
+	WasmGasGetPrevHash      = 50
+	WasmGasGetCaller        = 50
+	WasmGasGetCallToken     = 50
+	WasmGasGetCallAmount    = 50
+	WasmGasGetAddress       = 50
+	WasmGasGetBlockHash     = 50
+	WasmGasGetRemainingGas  = 10
+	WasmGasEmitEventBase    = 375
+	WasmGasEmitEventPerByte = 8 // charged per data byte, on top of the base (spec §6.5)
+
+	// WASM module cache
+	WasmModuleCacheMaxSize = 1000
+
+	// WasmBytecodeKeyPrefix is the key prefix for bytecode existence checks in WasmContract storage
+	WasmBytecodeKeyPrefix = []byte{2}
 
 	/// === Reward constants ===
 

@@ -107,5 +107,16 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxt0kenxxxxxxxxxxxxxxxxh9amk0", "name":"IssueToken", "id":"bc410b91", "signature":"IssueToken(string,string,string,uint256,uint256,uint8,bool,bool,bool)"}
 {"address":"z1qxemdeddedxt0kenxxxxxxxxxxxxxxxxh9amk0", "name":"Mint", "id":"cd70f9bc", "signature":"Mint(tokenStandard,uint256,address)"}
 {"address":"z1qxemdeddedxt0kenxxxxxxxxxxxxxxxxh9amk0", "name":"UpdateToken", "id":"2a3cf32c", "signature":"UpdateToken(tokenStandard,address,bool,bool)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Activate", "id":"86043400", "signature":"Activate(address,bytes32,bool)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"ChangeAdministrator", "id":"4f6bef7c", "signature":"ChangeAdministrator(address)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Deploy", "id":"ea243084", "signature":"Deploy(address,bytes32,uint32,uint32,bytes)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"DiscardChunks", "id":"5623edeb", "signature":"DiscardChunks(address,bytes32)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Execute", "id":"b2384f8b", "signature":"Execute(string,bytes)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Halt", "id":"4f082c9e", "signature":"Halt()"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Pause", "id":"63b5788e", "signature":"Pause(address)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Revoke", "id":"a48ef47d", "signature":"Revoke(address)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"SetWasmVariables", "id":"714ea832", "signature":"SetWasmVariables(uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64,uint64)"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Unhalt", "id":"3a16f20e", "signature":"Unhalt()"}
+{"address":"z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq", "name":"Unpause", "id":"128189f4", "signature":"Unpause(address)"}
 ]`)
 }

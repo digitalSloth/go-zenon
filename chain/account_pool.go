@@ -124,7 +124,7 @@ func (ap *accountPool) addAccountBlockTransaction(transaction *nom.AccountBlockT
 	frontierIdentifier := frontier.Identifier()
 
 	// check uncommitted plasma amount
-	if !forceAdd && !types.IsEmbeddedAddress(address) {
+	if !forceAdd && !types.IsContractAddress(address) {
 		if err := ap.checkUncommittedBlocksCount(address); err != nil {
 			return err
 		}

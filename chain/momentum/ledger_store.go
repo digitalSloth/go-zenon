@@ -88,8 +88,11 @@ func (ms *momentumStore) AddAccountBlockTransaction(header types.AccountHeader, 
 				return err
 			}
 
-			if types.IsEmbeddedAddress(block.ToAddress) {
+			if types.IsContractAddress(block.ToAddress) {
 				othStore.SequencerPushBack(block.Header())
+				if types.IsWasmContractAddress(block.ToAddress) {
+					ms.markWasmPending(block.ToAddress)
+				}
 			}
 		} else if block.BlockType != nom.BlockTypeGenesisReceive {
 			fromBlock, err := ms.GetAccountBlockByHash(block.FromBlockHash)
@@ -107,6 +110,18 @@ func (ms *momentumStore) AddAccountBlockTransaction(header types.AccountHeader, 
 			myStore := ms.getAccountMailbox(block.Address)
 			if err := myStore.MarkAsReceived(block.FromBlockHash); err != nil {
 				return err
+			}
+
+			// A WASM contract whose sequencer just drained has no more pending mail;
+			// drop it from the wasm-pending index. This mirrors markWasmPending on the
+			// send side and runs in the committed apply path, so the Delete is folded
+			// into the momentum patch (ChangesHash) deterministically across nodes.
+			// block.Address is the receiver (== header.Address for a contract-receive),
+			// whose patch was applied above, so its sequencer cursor is up to date.
+			if types.IsWasmContractAddress(block.Address) {
+				if err := ms.clearWasmPendingIfDrained(block.Address); err != nil {
+					return err
+				}
 			}
 		}
 	}

@@ -35,7 +35,7 @@ func (cs *contentSelector) filterBlocksToCommit(blocks []*nom.AccountBlock) []*n
 	toCommit := make([]*nom.AccountBlock, 0, len(blocks))
 	contractBatch := make([]*nom.AccountBlock, 0, int(cs.plasma.MaxContractBlocksInMomentum()))
 	for _, block := range blocks {
-		if types.IsEmbeddedAddress(block.Address) {
+		if types.IsContractAddress(block.Address) {
 			contractBatch = append(contractBatch, block)
 			// Can't end in BlockTypeContractSend because otherwise the embedded send blocks would
 			// be included but not the embedded receive block, since the embedded receive block
@@ -72,11 +72,11 @@ func (cs *contentSelector) filterBlocksToCommit(blocks []*nom.AccountBlock) []*n
 // 4. When comparing two user blocks from different addresses, the block with a higher block price has higher priority.
 // 5. If blocks are of equal priority price-wise then a block hash comparison will determine which block gets higher priority.
 func (cs *contentSelector) higherPriority(a, b *nom.AccountBlock) bool {
-	if types.IsEmbeddedAddress(b.Address) {
+	if types.IsContractAddress(b.Address) {
 		return false
 	}
 
-	if types.IsEmbeddedAddress(a.Address) {
+	if types.IsContractAddress(a.Address) {
 		return true
 	}
 

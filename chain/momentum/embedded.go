@@ -166,6 +166,20 @@ func (ms *momentumStore) IsSporkActive(implemented *types.ImplementedSpork) (boo
 	return false, nil
 }
 
+// IsWasmRuntimeSporkEnforced reports whether the WASM runtime is active. WasmRuntime
+// requires DynamicPlasma to be enforced first (§2.3); this dependency lives here so the
+// VM and the verifier share a single rule.
+func (ms *momentumStore) IsWasmRuntimeSporkEnforced() (bool, error) {
+	dynamicPlasmaActive, err := ms.IsSporkActive(types.DynamicPlasmaSpork)
+	if err != nil {
+		return false, err
+	}
+	if !dynamicPlasmaActive {
+		return false, nil
+	}
+	return ms.IsSporkActive(types.WasmRuntimeSpork)
+}
+
 func (ms *momentumStore) getEmbeddedStore(address types.Address) (store.Account, error) {
 	return ms.GetAccountStore(address), nil
 }

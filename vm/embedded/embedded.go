@@ -96,6 +96,25 @@ func applyBridgeAndLiquidityDiffs(contracts map[types.Address]*embeddedImplement
 	contracts[types.LiquidityContract].m[cabi.EmergencyMethodName] = &implementation.EmergencyLiquidity{MethodName: cabi.EmergencyMethodName}
 }
 
+func applyWasmRuntimeDiffs(contracts map[types.Address]*embeddedImplementation) {
+	contracts[types.WasmContract] = &embeddedImplementation{
+		m: map[string]Method{
+			cabi.DeployMethodName:                  &implementation.DeployMethod{MethodName: cabi.DeployMethodName},
+			cabi.ActivateMethodName:                &implementation.ActivateMethod{MethodName: cabi.ActivateMethodName},
+			cabi.DiscardChunksMethodName:           &implementation.DiscardChunksMethod{MethodName: cabi.DiscardChunksMethodName},
+			cabi.WasmHaltMethodName:                &implementation.WasmHaltMethod{MethodName: cabi.WasmHaltMethodName},
+			cabi.WasmUnhaltMethodName:              &implementation.WasmUnhaltMethod{MethodName: cabi.WasmUnhaltMethodName},
+			cabi.WasmChangeAdministratorMethodName: &implementation.WasmChangeAdministratorMethod{MethodName: cabi.WasmChangeAdministratorMethodName},
+			cabi.ExecuteMethodName:                 &implementation.ExecuteMethod{MethodName: cabi.ExecuteMethodName},
+			cabi.WasmRevokeMethodName:             &implementation.WasmRevokeMethod{MethodName: cabi.WasmRevokeMethodName},
+			cabi.WasmPauseMethodName:              &implementation.WasmPauseMethod{MethodName: cabi.WasmPauseMethodName},
+			cabi.WasmUnpauseMethodName:            &implementation.WasmUnpauseMethod{MethodName: cabi.WasmUnpauseMethodName},
+			cabi.SetWasmVariablesMethodName:     &implementation.SetWasmVariablesMethod{MethodName: cabi.SetWasmVariablesMethodName},
+		},
+		abi: cabi.ABIWasm,
+	}
+}
+
 func applyAcceleratorDiffs(contracts map[types.Address]*embeddedImplementation) {
 	contracts[types.AcceleratorContract] = &embeddedImplementation{
 		map[string]Method{
@@ -210,6 +229,7 @@ func getAllEmbedded() map[types.Address]*embeddedImplementation {
 	applyBridgeAndLiquidityDiffs(contractsMap)
 	applyHtlcDiffs(contractsMap)
 	applyDynamicPlasmaDiffs(contractsMap)
+	applyWasmRuntimeDiffs(contractsMap)
 	return contractsMap
 }
 
@@ -218,17 +238,23 @@ func getAllEmbedded() map[types.Address]*embeddedImplementation {
 // - returns constants.ErrContractDoesntExist in case the address doesn't link to a valid embedded contract
 // - returns constants.ErrContractMethodNotFound if the method doesn't exist
 func GetEmbeddedMethod(context vm_context.AccountVmContext, address types.Address, abiSelector []byte) (Method, error) {
-	if !types.IsEmbeddedAddress(address) {
+	if !types.IsContractAddress(address) {
 		return nil, constants.ErrNotContractAddress
 	}
 
-	// changing from fast assignment to doing merges
-	// how often is this called? better to only do once/as needed?
-
-	// the code before assumed a linear activation of sporks
-	// accelerator, bridge-liq, then htlc
-	// this will allow us to activate them independently on hyperqubes
-	// although other implicit dependencies may exist
+	// 0x02 WASM contract dispatch — route to WasmContract.Execute.
+	// Only deployed contracts (0x02 prefix) go through the Execute path.
+	// The 0x01 factory address falls through to normal embedded dispatch
+	// so methods like SetWasmVariables, Halt, Deploy etc. are handled correctly.
+	if types.IsWasmContractAddress(address) && address != types.WasmContract {
+		if !context.IsWasmRuntimeSporkEnforced() {
+			return nil, constants.ErrNotContractAddress
+		}
+		if _, err := cabi.ABIWasm.MethodById(abiSelector); err != nil {
+			return nil, constants.ErrContractMethodNotFound
+		}
+		return &implementation.ExecuteMethod{MethodName: cabi.ExecuteMethodName}, nil
+	}
 
 	contractsMap := getOrigin()
 	if context.IsAcceleratorSporkEnforced() {
@@ -243,8 +269,9 @@ func GetEmbeddedMethod(context vm_context.AccountVmContext, address types.Addres
 	if context.IsDynamicPlasmaSporkEnforced() {
 		applyDynamicPlasmaDiffs(contractsMap)
 	}
-	// No change for NoPillarRegSpork
-
+	if context.IsWasmRuntimeSporkEnforced() {
+		applyWasmRuntimeDiffs(contractsMap)
+	}
 	// contract address must exist in map
 	if p, found := contractsMap[address]; found {
 		// contract must implement the method

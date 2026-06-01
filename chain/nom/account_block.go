@@ -8,6 +8,7 @@ import (
 	"math/big"
 
 	"github.com/pkg/errors"
+	"golang.org/x/crypto/sha3"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/zenon-network/go-zenon/common"
@@ -24,6 +25,21 @@ const (
 	BlockTypeContractSend    = 4 // send
 	BlockTypeContractReceive = 5 // receive
 )
+
+// WasmAccountBlockVersion is stamped on contract-receive blocks under
+// WasmRuntimeSpork. Defined here (the package that owns ComputeHash)
+// as the single source of truth.
+const WasmAccountBlockVersion = uint64(3)
+
+// AccountBlockEvent is the consensus/wire type for WASM events stored on the block.
+// It mirrors vm/wasm.WasmEvent but lives in chain/nom to avoid an import cycle
+// (vm/wasm imports chain/nom). The vm layer converts WasmEvent → AccountBlockEvent.
+type AccountBlockEvent struct {
+	ContractAddress types.Address `json:"contractAddress"`
+	Topic           types.Hash    `json:"topic"`
+	Indexed         bool          `json:"indexed"`
+	Data            []byte        `json:"data"`
+}
 
 type AccountBlockTransaction struct {
 	Block   *AccountBlock
@@ -101,7 +117,8 @@ type AccountBlock struct {
 	FromBlockHash types.Hash `json:"fromBlockHash"`
 
 	// Batch information
-	DescendantBlocks []*AccountBlock `json:"descendantBlocks"` // hash of DescendantBlocks is included in hash
+	DescendantBlocks []*AccountBlock     `json:"descendantBlocks"` // hash of DescendantBlocks is included in hash
+	Events           []AccountBlockEvent `json:"events,omitempty"` // WASM events — included in hash when Version >= WasmAccountBlockVersion; omitempty keeps pre-spork RPC output byte-identical
 
 	Data []byte `json:"data"` // hash of Data is included in hash
 
@@ -163,6 +180,14 @@ func (ab *AccountBlock) Copy() *AccountBlock {
 	for _, dBlock := range ab.DescendantBlocks {
 		cBlock.DescendantBlocks = append(cBlock.DescendantBlocks, dBlock.Copy())
 	}
+
+	cBlock.Events = make([]AccountBlockEvent, len(ab.Events))
+	copy(cBlock.Events, ab.Events)
+	for i := range cBlock.Events {
+		cBlock.Events[i].Data = make([]byte, len(ab.Events[i].Data))
+		copy(cBlock.Events[i].Data, ab.Events[i].Data)
+	}
+
 	return &cBlock
 }
 
@@ -173,8 +198,38 @@ func (ab *AccountBlock) DescendantBlocksHash() types.Hash {
 	}
 	return types.NewHash(source)
 }
+
+// EventsHash computes a deterministic hash over the event list.
+// Empty list → zero hash. Order-sensitive. Includes ContractAddress and Indexed
+// in the hash input so events differing only by those fields produce different hashes.
+func (ab *AccountBlock) EventsHash() types.Hash {
+	if len(ab.Events) == 0 {
+		return types.Hash{}
+	}
+	h := sha3.New256()
+	for _, e := range ab.Events {
+		h.Write(e.Topic[:])
+		h.Write(e.ContractAddress[:])
+		if e.Indexed {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+		var lenBuf [4]byte
+		lenBuf[0] = byte(len(e.Data))
+		lenBuf[1] = byte(len(e.Data) >> 8)
+		lenBuf[2] = byte(len(e.Data) >> 16)
+		lenBuf[3] = byte(len(e.Data) >> 24)
+		h.Write(lenBuf[:])
+		h.Write(e.Data)
+	}
+	var result types.Hash
+	copy(result[:], h.Sum(nil))
+	return result
+}
+
 func (ab *AccountBlock) ComputeHash() types.Hash {
-	return types.NewHash(common.JoinBytes(
+	parts := [][]byte{
 		common.Uint64ToBytes(ab.Version),
 		common.Uint64ToBytes(ab.ChainIdentifier),
 		common.Uint64ToBytes(ab.BlockType),
@@ -191,7 +246,12 @@ func (ab *AccountBlock) ComputeHash() types.Hash {
 		common.Uint64ToBytes(ab.FusedPlasma),
 		common.Uint64ToBytes(ab.Difficulty),
 		ab.Nonce.Data[:],
-	))
+	}
+	// WASM spork: fold events hash into block hash for v3+ contract-receive blocks.
+	if ab.Version >= WasmAccountBlockVersion {
+		parts = append(parts, ab.EventsHash().Bytes())
+	}
+	return types.NewHash(common.JoinBytes(parts...))
 }
 
 func (ab *AccountBlock) Producer() types.Address {
@@ -254,6 +314,16 @@ func (ab *AccountBlock) Proto() *AccountBlockProto {
 		pb.DescendantBlocks = append(pb.DescendantBlocks, dBlock.Proto())
 	}
 
+	pb.Events = make([]*WasmEventProto, 0, len(ab.Events))
+	for i := range ab.Events {
+		pb.Events = append(pb.Events, &WasmEventProto{
+			ContractAddress: ab.Events[i].ContractAddress.Bytes(),
+			Topic:           ab.Events[i].Topic.Bytes(),
+			Indexed:         ab.Events[i].Indexed,
+			Data:            ab.Events[i].Data,
+		})
+	}
+
 	return pb
 }
 func DeProtoAccountBlock(pb *AccountBlockProto) *AccountBlock {
@@ -287,6 +357,25 @@ func DeProtoAccountBlock(pb *AccountBlockProto) *AccountBlock {
 	for index, dBlockProto := range pb.DescendantBlocks {
 		ab.DescendantBlocks[index] = DeProtoAccountBlock(dBlockProto)
 	}
+
+	ab.Events = make([]AccountBlockEvent, len(pb.Events))
+	for i, ep := range pb.Events {
+		var addr types.Address
+		if len(ep.ContractAddress) == types.AddressSize {
+			copy(addr[:], ep.ContractAddress)
+		}
+		var topic types.Hash
+		if len(ep.Topic) == types.HashSize {
+			copy(topic[:], ep.Topic)
+		}
+		ab.Events[i] = AccountBlockEvent{
+			ContractAddress: addr,
+			Topic:           topic,
+			Indexed:         ep.Indexed,
+			Data:            ep.Data,
+		}
+	}
+
 	return ab
 }
 func (ab *AccountBlock) Serialize() ([]byte, error) {
@@ -321,7 +410,8 @@ type AccountBlockMarshal struct {
 	FromBlockHash types.Hash `json:"fromBlockHash"`
 
 	// Batch information
-	DescendantBlocks []*AccountBlock `json:"descendantBlocks"` // hash of DescendantBlocks is included in hash
+	DescendantBlocks []*AccountBlock     `json:"descendantBlocks"`
+	Events           []AccountBlockEvent `json:"events,omitempty"`
 
 	Data []byte `json:"data"` // hash of Data is included in hash
 
@@ -367,6 +457,14 @@ func (ab *AccountBlock) ToNomMarshalJson() *AccountBlockMarshal {
 	for _, dBlock := range ab.DescendantBlocks {
 		aux.DescendantBlocks = append(aux.DescendantBlocks, dBlock)
 	}
+
+	aux.Events = make([]AccountBlockEvent, len(ab.Events))
+	copy(aux.Events, ab.Events)
+	for i := range aux.Events {
+		aux.Events[i].Data = make([]byte, len(ab.Events[i].Data))
+		copy(aux.Events[i].Data, ab.Events[i].Data)
+	}
+
 	return aux
 }
 
@@ -400,6 +498,14 @@ func (ab *AccountBlockMarshal) FromNomMarshalJson() *AccountBlock {
 	for _, dBlock := range ab.DescendantBlocks {
 		aux.DescendantBlocks = append(aux.DescendantBlocks, dBlock)
 	}
+
+	aux.Events = make([]AccountBlockEvent, len(ab.Events))
+	copy(aux.Events, ab.Events)
+	for i := range aux.Events {
+		aux.Events[i].Data = make([]byte, len(ab.Events[i].Data))
+		copy(aux.Events[i].Data, ab.Events[i].Data)
+	}
+
 	return aux
 }
 
@@ -438,6 +544,13 @@ func (ab *AccountBlock) UnmarshalJSON(data []byte) error {
 	ab.Signature = aux.Signature
 	for index, dBlock := range aux.DescendantBlocks {
 		ab.DescendantBlocks[index] = dBlock
+	}
+
+	ab.Events = make([]AccountBlockEvent, len(aux.Events))
+	copy(ab.Events, aux.Events)
+	for i := range ab.Events {
+		ab.Events[i].Data = make([]byte, len(aux.Events[i].Data))
+		copy(ab.Events[i].Data, aux.Events[i].Data)
 	}
 
 	return nil

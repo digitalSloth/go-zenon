@@ -131,7 +131,14 @@
                 "name": "dynamic-plasma",
                 "description": "Activates Dynamic Plasma",
                 "activated": true,
-                "enforcementHeight": 20
+                "enforcementHeight": 10
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000003",
+                "name": "wasm-runtime",
+                "description": "Activates WASM Runtime",
+                "activated": true,
+                "enforcementHeight": 15
             }
         ]
     },

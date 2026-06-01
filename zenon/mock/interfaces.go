@@ -4,6 +4,7 @@ import (
 	"github.com/zenon-network/go-zenon/chain/nom"
 	"github.com/zenon-network/go-zenon/common"
 	"github.com/zenon-network/go-zenon/common/types"
+	"github.com/zenon-network/go-zenon/vm/vm_context"
 	"github.com/zenon-network/go-zenon/zenon"
 )
 
@@ -20,4 +21,5 @@ type MockZenon interface {
 
 	SaveLogs(logger common.Logger) *common.Expecter
 	ExpectBalance(address types.Address, standard types.ZenonTokenStandard, expected int64)
+	EmbeddedContext(address types.Address) vm_context.AccountVmContext
 }

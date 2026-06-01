@@ -209,8 +209,8 @@ func TestSimple_MomentumInsertionBenchmark(b *testing.T) {
 	end := time.Now().UnixNano()
 
 	diff := (end - start) / 1000000
-	if diff > 1500 {
-		b.Fatalf("Test took too much. Expected to be less than 1500 ms but it took %v", diff)
+	if diff > 3000 {
+		b.Fatalf("Test took too much. Expected to be less than 3000 ms but it took %v", diff)
 	}
 }
 

@@ -44,6 +44,9 @@ type Momentum interface {
 	GetAllDefinedSporks() ([]*definition.Spork, error)
 	GetActivePillars() ([]*definition.PillarInfo, error)
 	IsSporkActive(*types.ImplementedSpork) (bool, error)
+	// IsWasmRuntimeSporkEnforced encodes the WasmRuntime → DynamicPlasma dependency
+	// (§2.3) in one place so the VM (vm/vm.go) and the verifier agree on the rule.
+	IsWasmRuntimeSporkEnforced() (bool, error)
 	GetStakeBeneficialAmount(addr types.Address) (*big.Int, error)
 	GetPlasmaVariables() (*definition.PlasmaVariables, error)
 	GetTokenInfoByTs(ts types.ZenonTokenStandard) (*definition.TokenInfo, error)
@@ -57,4 +60,8 @@ type Momentum interface {
 	Changes() (db.Patch, error)
 
 	AddAccountBlockTransaction(header types.AccountHeader, patch db.Patch) error
+
+	// WASM pending-receives index. The index is pruned internally in the committed
+	// momentum-apply path (see AddAccountBlockTransaction); producers only read it.
+	GetWasmPendingAddresses() ([]types.Address, error)
 }

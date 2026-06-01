@@ -125,7 +125,7 @@ func (abi *ABIContract) UnmarshalJSON(data []byte) error {
 	for _, field := range fields {
 		switch field.Type {
 		case "function":
-			abi.Methods[field.Name] = newMethod(field.Name, field.Inputs)
+			abi.Methods[field.Name] = newMethod(field.Name, field.Inputs, field.Outputs)
 		case "variable":
 			if len(field.Inputs) == 0 {
 				return errInvalidEmptyVariableInput

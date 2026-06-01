@@ -15,8 +15,9 @@ const (
 )
 
 const (
-	UserAddrByte     = byte(0)
-	ContractAddrByte = byte(1)
+	UserAddrByte         = byte(0)
+	ContractAddrByte     = byte(1)
+	WasmContractAddrByte = byte(2)
 )
 
 var (
@@ -31,8 +32,9 @@ var (
 	AcceleratorContract = parseEmbedded("z1qxemdeddedxaccelerat0rxxxxxxxxxxp4tk22")
 	HtlcContract        = parseEmbedded("z1qxemdeddedxhtlcxxxxxxxxxxxxxxxxxygecvw")
 	BridgeContract      = parseEmbedded("z1qxemdeddedxdrydgexxxxxxxxxxxxxxxmqgr0d")
+	WasmContract        = parseEmbedded("z1qxemdeddedxwasmxxxxxxxxxxxxxxxxxr38qaq")
 
-	EmbeddedContracts = []Address{PlasmaContract, PillarContract, TokenContract, SentinelContract, SwapContract, StakeContract, SporkContract, LiquidityContract, AcceleratorContract, HtlcContract, BridgeContract}
+	EmbeddedContracts = []Address{PlasmaContract, PillarContract, TokenContract, SentinelContract, SwapContract, StakeContract, SporkContract, LiquidityContract, AcceleratorContract, HtlcContract, BridgeContract, WasmContract}
 	EmbeddedWUpdate   = []Address{PillarContract, StakeContract, SentinelContract, LiquidityContract, AcceleratorContract}
 
 	SporkAddress *Address
@@ -48,6 +50,27 @@ var (
 
 func IsEmbeddedAddress(addr Address) bool {
 	return addr[0] == ContractAddrByte
+}
+
+func IsWasmContractAddress(addr Address) bool {
+	return addr[0] == WasmContractAddrByte
+}
+
+func IsContractAddress(addr Address) bool {
+	return addr[0] == ContractAddrByte || addr[0] == WasmContractAddrByte
+}
+
+// WasmAddress derives a deterministic 0x02-prefixed address for a WASM contract.
+// The 19 hash bytes come from SHA3-256(deployer || salt)[0:19] — same shape as PubKeyToAddress.
+func WasmAddress(deployer Address, salt [32]byte) Address {
+	var input []byte
+	input = append(input, deployer.Bytes()...)
+	input = append(input, salt[:]...)
+	hash := sha3.Sum256(input)
+	var addr Address
+	addr[0] = WasmContractAddrByte
+	copy(addr[1:], hash[0:AddressCoreSize])
+	return addr
 }
 
 type Address [AddressSize]byte

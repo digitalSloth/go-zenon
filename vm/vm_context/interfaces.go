@@ -36,4 +36,11 @@ type AccountVmContext interface {
 	IsHtlcSporkEnforced() bool
 	IsBridgeAndLiquiditySporkEnforced() bool
 	IsDynamicPlasmaSporkEnforced() bool
+	IsWasmRuntimeSporkEnforced() bool
+
+	// ====== WASM ======
+
+	WasmContractHasBytecode(addr types.Address) bool
+	Events() []nom.AccountBlockEvent
+	SetEvents(events []nom.AccountBlockEvent)
 }

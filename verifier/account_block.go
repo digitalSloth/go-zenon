@@ -8,9 +8,12 @@ import (
 	"github.com/zenon-network/go-zenon/chain"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	"github.com/zenon-network/go-zenon/chain/store"
+	"github.com/zenon-network/go-zenon/common"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/consensus"
 	"github.com/zenon-network/go-zenon/pow"
+	vm_constants "github.com/zenon-network/go-zenon/vm/constants"
+	"github.com/zenon-network/go-zenon/vm/embedded/definition"
 	"github.com/zenon-network/go-zenon/wallet"
 )
 
@@ -19,10 +22,10 @@ var (
 )
 
 func isBatched(block *nom.AccountBlock) bool {
-	return block.IsSendBlock() && types.IsEmbeddedAddress(block.Address)
+	return block.IsSendBlock() && types.IsContractAddress(block.Address)
 }
 func isContractReceive(block *nom.AccountBlock) bool {
-	return block.IsReceiveBlock() && types.IsEmbeddedAddress(block.Address)
+	return block.IsReceiveBlock() && types.IsContractAddress(block.Address)
 }
 
 type AccountBlockVerifier interface {
@@ -153,6 +156,9 @@ func (abv *accountBlockVerifier) all() error {
 	if err := abv.fromHash(); err != nil {
 		return err
 	}
+	if err := abv.wasmContractSend(); err != nil {
+		return err
+	}
 	if err := abv.sequencer(); err != nil {
 		return err
 	}
@@ -162,10 +168,30 @@ func (abv *accountBlockVerifier) version() error {
 	if abv.block.Version == 0 {
 		return ErrABVersionMissing
 	}
-	if abv.block.Version != 1 {
-		return ErrABVersionInvalid
+	if abv.block.Version == 1 {
+		// v1 blocks must not carry events — they are not folded into the hash.
+		if len(abv.block.Events) != 0 {
+			return ErrABVersionInvalid
+		}
+		return nil
 	}
-	return nil
+	// Post-spork: only BlockTypeContractReceive blocks may use version 3.
+	if abv.block.Version == nom.WasmAccountBlockVersion {
+		// Must use the enforced helper (WasmRuntime → DynamicPlasma dependency)
+		// so the verifier agrees with the producer in vm/vm.go.
+		isWasmEnforced, err := abv.momentumStore.IsWasmRuntimeSporkEnforced()
+		if err != nil {
+			return err
+		}
+		if !isWasmEnforced {
+			return ErrABVersionInvalid
+		}
+		if abv.block.BlockType != nom.BlockTypeContractReceive {
+			return ErrABVersionInvalid
+		}
+		return nil
+	}
+	return ErrABVersionInvalid
 }
 func (abv *accountBlockVerifier) chainIdentifier() error {
 	if abv.block.ChainIdentifier == 0 {
@@ -188,7 +214,7 @@ func (abv *accountBlockVerifier) blockType() error {
 		return ErrABTypeUnsupported
 	}
 
-	if types.IsEmbeddedAddress(abv.block.Address) {
+	if types.IsContractAddress(abv.block.Address) {
 		if abv.block.BlockType == nom.BlockTypeContractReceive || abv.block.BlockType == nom.BlockTypeContractSend {
 		} else {
 			return ErrABTypeMustBeContract
@@ -236,7 +262,7 @@ func (abv *accountBlockVerifier) amounts() error {
 }
 func (abv *accountBlockVerifier) pow() error {
 	if abv.block.Difficulty != 0 {
-		if types.IsEmbeddedAddress(abv.block.Address) {
+		if types.IsContractAddress(abv.block.Address) {
 			return ErrABPoWInvalid
 		}
 		if !pow.CheckPoWNonce(abv.block) {
@@ -263,7 +289,7 @@ func (abv *accountBlockVerifier) previous() error {
 	}
 
 	// don't check previous on contract
-	if types.IsEmbeddedAddress(abv.block.Address) {
+	if types.IsContractAddress(abv.block.Address) {
 		return nil
 	}
 
@@ -352,8 +378,51 @@ func (abv *accountBlockVerifier) fromHash() error {
 
 	return nil
 }
+func (abv *accountBlockVerifier) wasmContractSend() error {
+	if !abv.block.IsSendBlock() || !types.IsWasmContractAddress(abv.block.ToAddress) {
+		return nil
+	}
+	// Pre-spork rejection — same rule as vm.go applySend, including the
+	// WasmRuntime → DynamicPlasma dependency (§2.3, §3).
+	enforced, err := abv.momentumStore.IsWasmRuntimeSporkEnforced()
+	if err != nil {
+		return InternalError(err)
+	}
+	if !enforced {
+		return vm_constants.ErrWasmNotActivated
+	}
+	// Exempt deploy/finalize endowments emitted BY the WasmContract (0x01) management
+	// contract. WasmContract is the deploy authority: it only sends to a 0x02 address
+	// it is itself deploying, and the destination bytecode is written in the same
+	// atomic receive that emits this send — so it is not yet in this committed
+	// snapshot (§4.3, §4.4, §8.5). Must mirror vm.go applySend exactly so send-
+	// validation and verification agree. Sends from a 0x02 contract (Execute
+	// transfers) carry that contract's address, not WasmContract's, and stay checked.
+	if abv.block.Address == types.WasmContract {
+		return nil
+	}
+	// Pause check: if the contract is paused, only the deployer may send.
+	// Must mirror vm.go applySend exactly.
+	wasmContractStore := abv.momentumStore.GetAccountStore(types.WasmContract)
+	deployer, err := definition.GetWasmPausedDeployer(wasmContractStore.Storage(), abv.block.ToAddress)
+	if err != nil {
+		return InternalError(err)
+	}
+	if deployer != nil && abv.block.Address != *deployer {
+		return vm_constants.ErrWasmContractPaused
+	}
+	// Bytecode-exists check
+	has, err := wasmContractStore.Storage().Has(common.JoinBytes(vm_constants.WasmBytecodeKeyPrefix, abv.block.ToAddress.Bytes()))
+	if err != nil {
+		return InternalError(err)
+	}
+	if !has {
+		return vm_constants.ErrWasmContractNotDeployed
+	}
+	return nil
+}
 func (abv *accountBlockVerifier) sequencer() error {
-	if types.IsEmbeddedAddress(abv.block.Address) && abv.block.IsReceiveBlock() {
+	if types.IsContractAddress(abv.block.Address) && abv.block.IsReceiveBlock() {
 	} else {
 		return nil
 	}
@@ -398,7 +467,7 @@ func (abvt *accountBlockTransactionVerifier) all() error {
 }
 func (abvt *accountBlockTransactionVerifier) signature() error {
 	block := abvt.transaction.Block
-	if types.IsEmbeddedAddress(block.Address) {
+	if types.IsContractAddress(block.Address) {
 		if len(block.PublicKey) != 0 {
 			return ErrABPublicKeyMustBeZero
 		}
@@ -439,7 +508,7 @@ func (abvt *accountBlockTransactionVerifier) hash() error {
 func (abvt *accountBlockTransactionVerifier) producer() error {
 	block := abvt.transaction.Block
 
-	if types.IsEmbeddedAddress(block.Address) {
+	if types.IsContractAddress(block.Address) {
 		return nil
 	}
 	if types.PubKeyToAddress(block.PublicKey) != block.Address {
