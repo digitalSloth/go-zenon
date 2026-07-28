@@ -64,6 +64,31 @@ var (
 	// locally-generated hash (see vm/embedded/tests/dp_test.go for the existing pattern).
 	StateRootSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000003")
 
+	// OffchainExecutionSpork gates the activation of the Settlement embedded
+	// contract (off-chain execution / L2 settlement). It is a contract-activation
+	// spork: before its EnforcementHeight the Settlement address resolves to no
+	// contract and every Settlement method rejects; at activation the contract
+	// becomes live. It adds no momentum-version bump — commitments anchor through
+	// the existing ChangesHash path.
+	//
+	// PLACEHOLDER HASH. Sporks are identified by the hash of their CreateSpork
+	// transaction, which is deterministic from the tx contents and therefore not
+	// known until governance broadcasts the proposal. The release flow is:
+	//
+	//   1. Ship this binary with the placeholder. No on-chain spork can match it, so
+	//      IsSporkActive always returns false. Safe-by-default.
+	//   2. Governance broadcasts the CreateSpork tx. The resulting send-block hash is
+	//      the real SporkId.
+	//   3. Replace the placeholder with that hash, release a new binary, coordinate
+	//      the operator upgrade campaign.
+	//   4. Governance broadcasts ActivateSpork. After SporkMinHeightDelay momentums,
+	//      EnforcementHeight passes and every node activates the spork.
+	//
+	// Tests and devnet override ImplementedSporksMap at runtime with the
+	// locally-generated hash (see vm/embedded/tests/settlement_test.go for the
+	// existing pattern).
+	OffchainExecutionSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000004")
+
 	ImplementedSporksMap = map[Hash]bool{
 		AcceleratorSpork.SporkId:        true,
 		HtlcSpork.SporkId:               true,
@@ -72,6 +97,7 @@ var (
 		Libp2pSpork.SporkId:             true,
 		DynamicPlasmaSpork.SporkId:      true,
 		StateRootSpork.SporkId:          true,
+		OffchainExecutionSpork.SporkId:  true,
 	}
 )
 

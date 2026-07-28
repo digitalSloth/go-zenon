@@ -20,6 +20,7 @@ func getAllEmbedded() map[types.Address]*embeddedImplementation {
 	applyHtlcDiffs(contractsMap)
 	applyDynamicPlasmaDiffs(contractsMap)
 	applyPtlcDiffs(contractsMap)
+	applySettlementDiffs(contractsMap)
 	return contractsMap
 }
 
@@ -114,6 +115,7 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Revoke", "id":"58363e24", "signature":"Revoke()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"WithdrawQsr", "id":"b3d658fd", "signature":"WithdrawQsr()"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"ActivateSpork", "id":"25c54e96", "signature":"ActivateSpork(hash)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"CreateSpork", "id":"b602e311", "signature":"CreateSpork(string,string)"}
 {"address":"z1qxemdeddedxstakexxxxxxxxxxxxxxxxjv8v62", "name":"Cancel", "id":"5a92fe32", "signature":"Cancel(hash)"}
