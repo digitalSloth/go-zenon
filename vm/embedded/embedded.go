@@ -69,6 +69,15 @@ func applyHtlcDiffs(contracts map[types.Address]*embeddedImplementation) {
 	}
 }
 
+func applySettlementDiffs(contracts map[types.Address]*embeddedImplementation) {
+	contracts[types.SettlementContract] = &embeddedImplementation{
+		map[string]Method{
+			cabi.SettlementUpdateMethodName: &implementation.SettlementUpdateMethod{MethodName: cabi.SettlementUpdateMethodName},
+		},
+		cabi.ABISettlement,
+	}
+}
+
 func applyBridgeAndLiquidityDiffs(contracts map[types.Address]*embeddedImplementation) {
 	contracts[types.BridgeContract] = &embeddedImplementation{
 		map[string]Method{
@@ -226,6 +235,7 @@ const (
 	htlcSporkBit
 	dynamicPlasmaSporkBit
 	ptlcSporkBit
+	settlementSporkBit
 
 	embeddedVariantCombinations
 )
@@ -237,7 +247,7 @@ var (
 
 // buildEmbeddedVariants precomputes the merged contract map for every
 // combination of the 5 sporks GetEmbeddedMethod consults, so a call
-// only ever does an array lookup rather than rebuilding the map (10
+// only ever does an array lookup rather than rebuilding the map (11
 // contracts, ~60 method structs) from scratch every time. Runs once,
 // lazily, guarded by embeddedVariantsOnce.
 func buildEmbeddedVariants() {
@@ -257,6 +267,9 @@ func buildEmbeddedVariants() {
 		}
 		if key&ptlcSporkBit != 0 {
 			applyPtlcDiffs(contractsMap)
+		}
+		if key&settlementSporkBit != 0 {
+			applySettlementDiffs(contractsMap)
 		}
 		embeddedVariants[key] = contractsMap
 	}
@@ -288,6 +301,9 @@ func GetEmbeddedMethod(context vm_context.AccountVmContext, address types.Addres
 	}
 	if context.IsPtlcSporkEnforced() {
 		key |= ptlcSporkBit
+	}
+	if context.IsOffchainExecutionSporkEnforced() {
+		key |= settlementSporkBit
 	}
 	// No change for NoPillarRegSpork
 	contractsMap := embeddedVariants[key]
