@@ -17,6 +17,7 @@ func saveSporkState(t *testing.T) {
 	savedBridge := types.BridgeAndLiquiditySpork.SporkId
 	savedHtlc := types.HtlcSpork.SporkId
 	savedStateRoot := types.StateRootSpork.SporkId
+	savedOffchainExecution := types.OffchainExecutionSpork.SporkId
 	savedMap := make(map[types.Hash]bool, len(types.ImplementedSporksMap))
 	for k, v := range types.ImplementedSporksMap {
 		savedMap[k] = v
@@ -27,6 +28,7 @@ func saveSporkState(t *testing.T) {
 		types.BridgeAndLiquiditySpork.SporkId = savedBridge
 		types.HtlcSpork.SporkId = savedHtlc
 		types.StateRootSpork.SporkId = savedStateRoot
+		types.OffchainExecutionSpork.SporkId = savedOffchainExecution
 		types.ImplementedSporksMap = savedMap
 	})
 }

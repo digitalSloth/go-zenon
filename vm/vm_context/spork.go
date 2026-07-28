@@ -34,3 +34,8 @@ func (ctx *accountVmContext) IsPtlcSporkEnforced() bool {
 	common.DealWithErr(err)
 	return active
 }
+func (ctx *accountVmContext) IsOffchainExecutionSporkEnforced() bool {
+	active, err := ctx.cacheStore.IsSporkActive(types.OffchainExecutionSpork)
+	common.DealWithErr(err)
+	return active
+}

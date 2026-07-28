@@ -281,4 +281,8 @@ var (
 	// ErrABDataTrailingBytes rejects account-block data that carries
 	// bytes past the ABI-encoded arguments (Dynamic Plasma spork).
 	ErrABDataTrailingBytes = errors.New("account-block data has trailing bytes past ABI-encoded arguments")
+
+	// ErrNotImplemented rejects a Settlement method that has no
+	// implementation yet.
+	ErrNotImplemented = errors.New("not implemented")
 )
