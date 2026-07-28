@@ -84,11 +84,14 @@ var (
 	// BridgeContract is the address of the embedded contract that
 	// wraps and unwraps assets across the multichain bridge.
 	BridgeContract = parseEmbedded("z1qxemdeddedxdrydgexxxxxxxxxxxxxxxmqgr0d")
+	// SettlementContract is the address of the embedded contract that
+	// settles off-chain execution domains.
+	SettlementContract = parseEmbedded("z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9")
 
 	// EmbeddedContracts lists the addresses of all embedded contracts.
 	// The pillar worker walks this list to auto-generate the receive
 	// blocks for transactions sent to the contracts.
-	EmbeddedContracts = []Address{PlasmaContract, PillarContract, TokenContract, SentinelContract, SwapContract, StakeContract, SporkContract, LiquidityContract, AcceleratorContract, HtlcContract, PtlcContract, BridgeContract}
+	EmbeddedContracts = []Address{PlasmaContract, PillarContract, TokenContract, SentinelContract, SwapContract, StakeContract, SporkContract, LiquidityContract, AcceleratorContract, HtlcContract, PtlcContract, BridgeContract, SettlementContract}
 	// EmbeddedWUpdate lists the embedded contracts that expose a
 	// periodic Update method; pillars send Update transactions to
 	// these addresses when enough time has passed since the last
