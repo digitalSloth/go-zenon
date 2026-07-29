@@ -68,7 +68,7 @@ func NewZenon(cfg *Config) (Zenon, error) {
 		return nil, fmt.Errorf("open cache database: %w", err)
 	}
 
-	z.chain = chain.NewChain(chainManager, cacheManager, cfg.GenesisConfig)
+	z.chain = chain.NewChain(chainManager, cacheManager, cfg.GenesisConfig, cfg.StateTreeDir(), cfg.StateTreeArchive)
 
 	// Open the consensus election database.
 	db, levelDb, err := cfg.NewLevelDB("consensus")

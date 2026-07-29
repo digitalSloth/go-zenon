@@ -14,8 +14,10 @@ type rollbackTestChain struct {
 	chain.Chain
 	rollbackErr      error
 	cacheRollbackErr error
+	treeRollbackErr  error
 	rollbackCalls    int
 	cacheCalls       int
+	treeCalls        int
 }
 
 func (c *rollbackTestChain) RollbackTo(sync.Locker, types.HashHeight) error {
@@ -27,6 +29,18 @@ func (c *rollbackTestChain) RollbackCacheTo(sync.Locker, types.HashHeight) error
 	c.cacheCalls++
 	return c.cacheRollbackErr
 }
+
+func (c *rollbackTestChain) TruncateStateTreeTo(sync.Locker, types.HashHeight) error {
+	c.treeCalls++
+	return c.treeRollbackErr
+}
+
+// InsertChain's failed-AddMomentumTransaction path (the RollbackCacheTo + TruncateStateTreeTo
+// pairing) is not covered in this package: c.supervisor is a concrete *vm.Supervisor, not an
+// interface, so there is no seam here to make AddMomentumTransaction fail without driving a
+// real vm.Supervisor/chain.Chain end to end. That invariant — the state tree frontier tracking
+// the chain frontier across a rollback — is covered against a real chain.Chain instead by
+// TestStateTree_TruncateAfterSpeculativeUpdateRestoresFrontier in chain/tests/state_tree_test.go.
 
 func TestRollbackSideChainCacheFailureIsUnrecoverable(t *testing.T) {
 	testChain := &rollbackTestChain{cacheRollbackErr: errors.New("cache rollback failed")}
@@ -42,6 +56,20 @@ func TestRollbackSideChainCacheFailureIsUnrecoverable(t *testing.T) {
 	common.Expect(t, testChain.cacheCalls, 1)
 }
 
+func TestRollbackSideChainStateTreeFailureIsUnrecoverable(t *testing.T) {
+	testChain := &rollbackTestChain{treeRollbackErr: errors.New("state tree rollback failed")}
+	bridge := chainBridge{chain: testChain}
+
+	err := bridge.rollbackSideChain(&sync.Mutex{}, types.HashHeight{Height: 1})
+
+	var uncertain *chain.ErrCanonicalStateUncertain
+	common.ExpectTrue(t, errors.As(err, &uncertain))
+	common.ExpectTrue(t, uncertain.RollbackErr != nil)
+	common.Expect(t, testChain.rollbackCalls, 1)
+	common.Expect(t, testChain.cacheCalls, 1)
+	common.Expect(t, testChain.treeCalls, 1)
+}
+
 func TestRollbackSideChainCanonicalFailureSkipsCache(t *testing.T) {
 	rollbackErr := errors.New("canonical rollback failed")
 	testChain := &rollbackTestChain{rollbackErr: rollbackErr}
@@ -52,6 +80,7 @@ func TestRollbackSideChainCanonicalFailureSkipsCache(t *testing.T) {
 	common.ExpectTrue(t, errors.Is(err, rollbackErr))
 	common.Expect(t, testChain.rollbackCalls, 1)
 	common.Expect(t, testChain.cacheCalls, 0)
+	common.Expect(t, testChain.treeCalls, 0)
 }
 
 func TestRollbackSideChainSuccess(t *testing.T) {
@@ -63,4 +92,5 @@ func TestRollbackSideChainSuccess(t *testing.T) {
 	common.FailIfErr(t, err)
 	common.Expect(t, testChain.rollbackCalls, 1)
 	common.Expect(t, testChain.cacheCalls, 1)
+	common.Expect(t, testChain.treeCalls, 1)
 }

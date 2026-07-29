@@ -80,6 +80,11 @@ func TestUncommittedListingDuringMomentumRollback(t *testing.T) {
 
 		insert := z.Chain().AcquireInsert("uncommitted listing rollback test")
 		err := z.Chain().RollbackTo(insert, before)
+		if err == nil {
+			// The chain bridge truncates the state tree with the chain, so
+			// the next momentum folds onto the rolled-back frontier.
+			err = z.Chain().TruncateStateTreeTo(insert, before)
+		}
 		insert.Unlock()
 		close(stop)
 		done.Wait()

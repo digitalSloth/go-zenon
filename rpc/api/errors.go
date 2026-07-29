@@ -50,4 +50,8 @@ var (
 	// same bound the paginated methods apply to one page. It is
 	// returned before any state is read.
 	ErrListParamTooBig = common.NewErrorWCode(-32000, "list parameter is too big")
+	// ErrStateRootNotActivated is returned by LedgerApi.GetStateRoot and
+	// LedgerApi.GetProof for a height before StateRootSpork was enforced,
+	// where the momentum header carries no state root.
+	ErrStateRootNotActivated = common.NewErrorWCode(-32000, "state root not available before its activation height")
 )
