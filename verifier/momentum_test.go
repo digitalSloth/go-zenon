@@ -6,6 +6,7 @@ import (
 	"github.com/zenon-network/go-zenon/chain"
 	"github.com/zenon-network/go-zenon/chain/nom"
 	"github.com/zenon-network/go-zenon/chain/store"
+	"github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/dp"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
@@ -300,5 +301,122 @@ func TestRawMomentumVerifier_Content_EmbeddedAddress_SkipsCanonicalRecompute(t *
 
 	if err := rmv.content(true); err != nil {
 		t.Fatalf("expected no error for an untouched embedded-address block, got %v", err)
+	}
+}
+
+func TestVersionRuleTriState(t *testing.T) {
+	cases := []struct {
+		name    string
+		dp, sr  bool
+		version uint64
+		wantErr error
+	}{
+		{"missing version", false, false, 0, ErrMVersionMissing},
+
+		{"legacy ok", false, false, 1, nil},
+		{"legacy rejects v2", false, false, 2, ErrMVersionInvalid},
+		{"legacy rejects v3", false, false, 3, ErrMVersionInvalid},
+
+		{"dp ok", true, false, 2, nil},
+		{"dp rejects v1", true, false, 1, ErrMVersionInvalid},
+		{"dp rejects v3", true, false, 3, ErrMVersionInvalid},
+
+		{"state-root ok", true, true, 3, nil},
+		{"state-root rejects v2", true, true, 2, ErrMVersionInvalid},
+		{"state-root rejects v1", true, true, 1, ErrMVersionInvalid},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rmv := &rawMomentumVerifier{momentum: &nom.Momentum{Version: c.version}}
+			if got := rmv.version(c.dp, c.sr); got != c.wantErr {
+				t.Fatalf("version(dp=%v,sr=%v,v=%d) = %v, want %v", c.dp, c.sr, c.version, got, c.wantErr)
+			}
+		})
+	}
+}
+
+type fakeStateRoot struct {
+	root types.Hash
+	err  error
+}
+
+func (f fakeStateRoot) ComputeStateRoot(previous types.HashHeight, changes db.Patch) (types.Hash, error) {
+	return f.root, f.err
+}
+
+func newTxVerifier(active bool, srv stateRootVerifier, m *nom.Momentum) *momentumTransactionVerifier {
+	return &momentumTransactionVerifier{
+		transaction:       &nom.MomentumTransaction{Momentum: m, Changes: db.NewPatch()},
+		stateRoot:         srv,
+		isStateRootActive: active,
+	}
+}
+
+func TestVerifyStateRootInactive(t *testing.T) {
+	// Before activation, a zero StateRoot is required.
+	m := &nom.Momentum{Version: 2, Height: 5}
+	if err := newTxVerifier(false, nil, m).verifyStateRoot(&nom.MomentumTransaction{Momentum: m}); err != nil {
+		t.Fatalf("inactive + zero StateRoot should pass, got %v", err)
+	}
+
+	m.StateRoot = types.NewHash([]byte("x"))
+	v := newTxVerifier(false, nil, m)
+	if err := v.verifyStateRoot(v.transaction); err != ErrMStateRootMustBeZero {
+		t.Fatalf("inactive + non-zero StateRoot = %v, want ErrMStateRootMustBeZero", err)
+	}
+}
+
+func TestVerifyStateRootActive(t *testing.T) {
+	root := types.NewHash([]byte("computed-root"))
+
+	// Matching root passes.
+	m := &nom.Momentum{Version: 3, Height: 5, StateRoot: root}
+	v := newTxVerifier(true, fakeStateRoot{root: root}, m)
+	if err := v.verifyStateRoot(v.transaction); err != nil {
+		t.Fatalf("active + matching root should pass, got %v", err)
+	}
+
+	// Mismatched root is rejected.
+	bad := &nom.Momentum{Version: 3, Height: 5, StateRoot: types.NewHash([]byte("wrong"))}
+	vb := newTxVerifier(true, fakeStateRoot{root: root}, bad)
+	if err := vb.verifyStateRoot(vb.transaction); err != ErrMStateRootInvalid {
+		t.Fatalf("active + mismatched root = %v, want ErrMStateRootInvalid", err)
+	}
+}
+
+// recordingStateRoot records whether ComputeStateRoot was invoked, so tests can assert the
+// expensive fold never runs once a cheap check has already failed.
+type recordingStateRoot struct {
+	called bool
+	root   types.Hash
+}
+
+func (r *recordingStateRoot) ComputeStateRoot(previous types.HashHeight, changes db.Patch) (types.Hash, error) {
+	r.called = true
+	return r.root, nil
+}
+
+// TestAllRunsVerifyStateRootLast asserts that all() returns the cheap-check error (an invalid
+// hash) before ever invoking verifyStateRoot, so a multiply-invalid momentum never pays for the
+// full SMT fold.
+func TestAllRunsVerifyStateRootLast(t *testing.T) {
+	m := &nom.Momentum{Version: 3, Height: 5}
+	m.ChangesHash = db.PatchHash(db.NewPatch())
+	// Leave m.Hash as its zero value: ComputeHash() over the rest of the fields will not match,
+	// so the cheap hash check fails first.
+
+	srv := &recordingStateRoot{root: types.NewHash([]byte("state-root"))}
+	mv := &momentumTransactionVerifier{
+		transaction:       &nom.MomentumTransaction{Momentum: m, Changes: db.NewPatch()},
+		stateRoot:         srv,
+		isStateRootActive: true,
+	}
+
+	err := mv.all()
+	if err != ErrMHashInvalid {
+		t.Fatalf("all() = %v, want ErrMHashInvalid", err)
+	}
+	if srv.called {
+		t.Fatalf("all() invoked ComputeStateRoot before the cheap hash check failed")
 	}
 }

@@ -213,6 +213,36 @@ func NewLevelDBManager(dir string) Manager {
 	}
 }
 
+// NewReadOnlyLevelDBManager opens dir read-only and requires it to already exist, returning an
+// error instead of panicking so a caller that only needs to read an existing chain database (the
+// offline state-tree prebuild CLI path) can fail cleanly on a missing or locked directory rather
+// than creating one or panicking through common.DealWithErr. Its write-side Manager methods
+// (Add/Pop) are never expected to be called against the returned Manager.
+func NewReadOnlyLevelDBManager(dir string) (Manager, error) {
+	opts := &opt.Options{OpenFilesCacheCapacity: getOpenFilesCacheCapacity(), ReadOnly: true, ErrorIfMissing: true}
+	ldb, err := leveldb.OpenFile(dir, opts)
+	if err != nil {
+		return nil, err
+	}
+	l1Cache, err := lru.New(l1CacheSize)
+	if err != nil {
+		return nil, err
+	}
+	l2Cache, err := lru.New(l2CacheSize)
+	if err != nil {
+		return nil, err
+	}
+	return &ldbManager{
+		location: dir,
+		l1Cache:  l1Cache,
+		l2Cache:  l2Cache,
+		ldb:      ldb,
+		write: func(batch *leveldb.Batch) error {
+			return ldb.Write(batch, nil)
+		},
+	}, nil
+}
+
 func (m *ldbManager) Frontier() DB {
 	m.changes.Lock()
 	defer m.changes.Unlock()

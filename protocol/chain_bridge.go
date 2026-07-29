@@ -199,6 +199,11 @@ func (c chainBridge) InsertChain(momentums []*nom.DetailedMomentum) (int, error)
 			}
 			return 0, errors.Errorf("unable to rollback to %v. Reason:%v", target.Identifier(), err)
 		}
+
+		err = c.chain.TruncateStateTreeTo(insert, target.Identifier())
+		if err != nil {
+			return 0, errors.Errorf("unable to rollback state tree to %v. Reason:%v", target.Identifier(), err)
+		}
 	}
 
 	// Insert momentum now
@@ -230,6 +235,10 @@ func (c chainBridge) InsertChain(momentums []*nom.DetailedMomentum) (int, error)
 			log.Error("error while inserting cache", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
 			return index + start, err
 		}
+		if err := c.chain.UpdateStateTree(insert, detailed, transaction.Changes); err != nil {
+			log.Error("error while inserting state tree", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
+			return index + start, err
+		}
 		if err := c.chain.AddMomentumTransaction(insert, transaction); err != nil {
 			log.Error("error while inserting momentum", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
 			var uncertain *chain.ErrCanonicalStateUncertain
@@ -239,6 +248,10 @@ func (c chainBridge) InsertChain(momentums []*nom.DetailedMomentum) (int, error)
 			}
 			if rollbackErr := c.chain.RollbackCacheTo(insert, detailed.Momentum.Previous()); rollbackErr != nil {
 				log.Crit("cache rollback failed after failed momentum insertion, can't continue", "reason", rollbackErr, "cause", err, "momentum-identifier", detailed.Momentum.Identifier())
+				os.Exit(2)
+			}
+			if truncateErr := c.chain.TruncateStateTreeTo(insert, detailed.Momentum.Previous()); truncateErr != nil {
+				log.Crit("state tree truncate failed after failed momentum insertion, can't continue", "reason", truncateErr, "cause", err, "momentum-identifier", detailed.Momentum.Identifier())
 				os.Exit(2)
 			}
 			return index + start, err

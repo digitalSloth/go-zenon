@@ -59,9 +59,24 @@ func (mv *momentumVerifier) Momentum(detailed *nom.DetailedMomentum) error {
 	}).all()
 }
 func (mv *momentumVerifier) MomentumTransaction(transaction *nom.MomentumTransaction) error {
+	// Read the state-root spork flag from the parent momentum store. This is a separate
+	// interface method from Momentum() with no shared frame, so the flag cannot be threaded
+	// from version()'s read; this is one extra cheap store lookup (the same shape the raw
+	// verifier already does for DynamicPlasmaSpork). The flag MUST live only on the per-call
+	// verifier below, never on the shared mv receiver (reused across concurrent verifications).
+	momentumStore, err := mv.getContext(transaction.Momentum)
+	if err != nil {
+		return err
+	}
+	isStateRootActive, err := momentumStore.IsSporkActive(types.StateRootSpork)
+	if err != nil {
+		return err
+	}
 	return (&momentumTransactionVerifier{
-		transaction: transaction,
-		consensus:   mv.consensus,
+		transaction:       transaction,
+		consensus:         mv.consensus,
+		stateRoot:         mv.chain, // chain.Chain satisfies stateRootVerifier via StateTree
+		isStateRootActive: isStateRootActive,
 	}).all()
 }
 
@@ -87,10 +102,17 @@ func (rmv *rawMomentumVerifier) all() error {
 	if err != nil {
 		return err
 	}
+	// LOCAL to this call; consumed only by version(). MomentumTransaction performs its own
+	// IsSporkActive(StateRootSpork) read for stateRoot() (the two run on separate interface
+	// methods with no shared frame); both read the same parent store, so they agree.
+	isStateRootActive, err := rmv.momentumStore.IsSporkActive(types.StateRootSpork)
+	if err != nil {
+		return err
+	}
 	if err := rmv.chainIdentifier(); err != nil {
 		return err
 	}
-	if err := rmv.version(isDynamicPlasmaActive); err != nil {
+	if err := rmv.version(isDynamicPlasmaActive, isStateRootActive); err != nil {
 		return err
 	}
 	if err := rmv.timestamp(); err != nil {
@@ -122,15 +144,20 @@ func (rmv *rawMomentumVerifier) chainIdentifier() error {
 	}
 	return nil
 }
-func (rmv *rawMomentumVerifier) version(isDynamicPlasmaActive bool) error {
+func (rmv *rawMomentumVerifier) version(isDynamicPlasmaActive, isStateRootActive bool) error {
 	if rmv.momentum.Version == 0 {
 		return ErrMVersionMissing
 	}
-	if isDynamicPlasmaActive {
+	switch {
+	case isStateRootActive:
+		if rmv.momentum.Version != 3 {
+			return ErrMVersionInvalid
+		}
+	case isDynamicPlasmaActive:
 		if rmv.momentum.Version != 2 {
 			return ErrMVersionInvalid
 		}
-	} else {
+	default:
 		if rmv.momentum.Version != 1 {
 			return ErrMVersionInvalid
 		}
@@ -317,9 +344,19 @@ func (rmv *rawMomentumVerifier) content(isDynamicPlasmaActive bool) error {
 	return nil
 }
 
+// stateRootVerifier is the minimal handle the transaction verifier needs to recompute the
+// candidate state root. It is satisfied by chain.Chain (which embeds chain.StateTree); the
+// verifier depends only on this one method, keeping the mock harness small.
+type stateRootVerifier interface {
+	ComputeStateRoot(previous types.HashHeight, changes db.Patch) (types.Hash, error)
+}
+
 type momentumTransactionVerifier struct {
 	transaction *nom.MomentumTransaction
 	consensus   consensus.Consensus
+
+	stateRoot         stateRootVerifier
+	isStateRootActive bool
 }
 
 func (mv *momentumTransactionVerifier) all() error {
@@ -333,6 +370,9 @@ func (mv *momentumTransactionVerifier) all() error {
 		return err
 	}
 	if err := mv.producer(mv.transaction); err != nil {
+		return err
+	}
+	if err := mv.verifyStateRoot(mv.transaction); err != nil {
 		return err
 	}
 	return nil
@@ -360,6 +400,27 @@ func (mv *momentumTransactionVerifier) changesHash(transaction *nom.MomentumTran
 	if computedHash != transaction.Momentum.ChangesHash {
 		log.Info("changes-hash differ", "expected", computedHash, "got-instead", transaction.Momentum.ChangesHash)
 		return ErrMChangesHashInvalid
+	}
+	return nil
+}
+func (mv *momentumTransactionVerifier) verifyStateRoot(transaction *nom.MomentumTransaction) error {
+	momentum := transaction.Momentum
+	if !mv.isStateRootActive {
+		// Before activation, StateRoot must be empty (mirrors the data() rule).
+		if !momentum.StateRoot.IsZero() {
+			return ErrMStateRootMustBeZero
+		}
+		return nil
+	}
+	// previous == frontier in the consensus path; ComputeStateRoot folds transaction.Changes
+	// onto the parent tree version without committing and returns the candidate root.
+	expected, err := mv.stateRoot.ComputeStateRoot(momentum.Previous(), transaction.Changes)
+	if err != nil {
+		return InternalError(err)
+	}
+	if expected != momentum.StateRoot {
+		log.Info("state-root differ", "expected", expected, "got-instead", momentum.StateRoot)
+		return ErrMStateRootInvalid
 	}
 	return nil
 }

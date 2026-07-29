@@ -26,13 +26,14 @@ type chain struct {
 	*momentumPool
 	*momentumEventManager
 	*chainCache
+	*stateTree
 
 	chainManager db.Manager
 	cacheManager storage.CacheManager
 	insert       sync.Mutex
 }
 
-func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesis store.Genesis) *chain {
+func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesis store.Genesis, stateTreeDir string, stateTreeArchive bool) *chain {
 	momentumPool := NewMomentumPool(chainManager, genesis)
 	cache := NewChainCache(cacheManager)
 	return &chain{
@@ -42,6 +43,7 @@ func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesi
 		momentumPool:         momentumPool,
 		momentumEventManager: momentumPool.momentumEventManager,
 		chainCache:           cache,
+		stateTree:            newStateTree(stateTreeDir, stateTreeArchive),
 		chainManager:         chainManager,
 		cacheManager:         cacheManager,
 	}
@@ -67,6 +69,10 @@ func (c *chain) Init() error {
 	}
 
 	if err := c.chainCache.Init(c.chainManager, frontierStore); err != nil {
+		return err
+	}
+
+	if err := c.stateTree.Init(c.chainManager, frontierStore); err != nil {
 		return err
 	}
 
@@ -97,6 +103,8 @@ func (c *chain) Start() error {
 	c.log.Info("starting ...")
 	defer c.log.Info("started")
 
+	c.stateTree.startBuild(c)
+
 	return nil
 }
 func (c *chain) Stop() error {
@@ -104,6 +112,10 @@ func (c *chain) Stop() error {
 	defer c.log.Info("stopped")
 
 	c.UnRegister(c.accountPool)
+
+	if err := c.stateTree.stop(); err != nil {
+		return err
+	}
 
 	if err := c.cacheManager.Stop(); err != nil {
 		return err

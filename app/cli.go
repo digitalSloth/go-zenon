@@ -54,6 +54,7 @@ func init() {
 	app.Commands = []*cli.Command{
 		versionCommand,
 		licenseCommand,
+		stateTreeCommand,
 	}
 	sort.Sort(cli.CommandsByName(app.Commands))
 

@@ -311,6 +311,16 @@ func (s *Supervisor) packMomentum(context vm_context.MomentumVMContext, momentum
 	}
 
 	if signFunc != nil || isGenesis {
+		// From version 3, the producer records the state root (folded onto the parent tree,
+		// which is the frontier at production time) before hashing. Received momentums keep
+		// their producer-set StateRoot, which the verifier re-checks via ComputeStateRoot.
+		if momentum.Version >= nom.StateRootMomentumVersion {
+			root, err := s.chain.ComputeStateRoot(momentum.Previous(), changes)
+			if err != nil {
+				return nil, err
+			}
+			momentum.StateRoot = root
+		}
 		momentum.ChangesHash = db.PatchHash(changes)
 		momentum.Hash = momentum.ComputeHash()
 	}

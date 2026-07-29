@@ -31,7 +31,7 @@ func NewZenon(cfg *Config) (Zenon, error) {
 	z := &zenon{
 		config: cfg,
 	}
-	z.chain = chain.NewChain(cfg.NewDBManager("nom"), cache.NewCacheDBManager(cfg.DataDir), cfg.GenesisConfig)
+	z.chain = chain.NewChain(cfg.NewDBManager("nom"), cache.NewCacheDBManager(cfg.DataDir), cfg.GenesisConfig, cfg.StateTreeDir(), cfg.StateTreeArchive)
 	db, levelDb := cfg.NewLevelDB("consensus")
 	z.consensus = consensus.NewConsensus(db, z.chain, false)
 	z.verifier = verifier.NewVerifier(z.chain, z.consensus, vm.CanonicalBasePlasma)

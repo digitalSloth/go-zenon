@@ -324,6 +324,83 @@ func (l *LedgerApi) GetMomentumByHash(hash types.Hash) (*Momentum, error) {
 	}
 	return ledgerMomentumToRpc(block)
 }
+
+// StateProof is the response of GetProof: the value at the key (nil if absent), the
+// compressed-sparse proof, and the state root the proof reconstructs to (which a caller
+// cross-checks against the momentum header's StateRoot). value/proof are base64 in JSON.
+type StateProof struct {
+	Value []byte     `json:"value"`
+	Proof []byte     `json:"proof"`
+	Root  types.Hash `json:"root"`
+}
+
+func (l *LedgerApi) identifierAtHeight(height uint64) (types.HashHeight, error) {
+	if height == 0 {
+		return types.HashHeight{}, ErrHeightParamIsZero
+	}
+	momentum, err := l.chain.GetFrontierMomentumStore().GetMomentumByHeight(height)
+	if err != nil {
+		return types.HashHeight{}, err
+	}
+	if momentum == nil {
+		return types.HashHeight{}, errors.Errorf("no momentum at height %d", height)
+	}
+	return momentum.Identifier(), nil
+}
+
+// stateRootIdentifierAtHeight mirrors identifierAtHeight but additionally rejects heights before
+// StateRootSpork's activation: before activation the momentum header carries an empty StateRoot,
+// so the live tree root at that height is not consensus-authenticated. A momentum's version is
+// exactly nom.StateRootMomentumVersion iff StateRootSpork was active at that height (enforced by
+// the verifier's version rule).
+func (l *LedgerApi) stateRootIdentifierAtHeight(height uint64) (types.HashHeight, error) {
+	if height == 0 {
+		return types.HashHeight{}, ErrHeightParamIsZero
+	}
+	momentum, err := l.chain.GetFrontierMomentumStore().GetMomentumByHeight(height)
+	if err != nil {
+		return types.HashHeight{}, err
+	}
+	if momentum == nil {
+		return types.HashHeight{}, errors.Errorf("no momentum at height %d", height)
+	}
+	if momentum.Version < nom.StateRootMomentumVersion {
+		return types.HashHeight{}, ErrStateRootNotActivated
+	}
+	return momentum.Identifier(), nil
+}
+
+// GetStateRoot returns the Merkleized state root at the given momentum height. It errors with a
+// not-retained ("no such version") error for heights pruned below a non-archive node's horizon.
+func (l *LedgerApi) GetStateRoot(height uint64) (types.Hash, error) {
+	defer common.RecoverStack()
+	identifier, err := l.stateRootIdentifierAtHeight(height)
+	if err != nil {
+		return types.Hash{}, err
+	}
+	return l.chain.StateRoot(identifier)
+}
+
+// GetProof returns a proof that `key` maps to a value (or is absent) in the state at `height`,
+// plus the root it reconstructs to. The proof verifies with the standalone trie.VerifyProof /
+// trie.VerifyAbsence against the momentum header's StateRoot — no node trust required.
+func (l *LedgerApi) GetProof(height uint64, key []byte) (*StateProof, error) {
+	defer common.RecoverStack()
+	identifier, err := l.stateRootIdentifierAtHeight(height)
+	if err != nil {
+		return nil, err
+	}
+	value, proof, err := l.chain.GetProof(identifier, key)
+	if err != nil {
+		return nil, err
+	}
+	root, err := l.chain.StateRoot(identifier)
+	if err != nil {
+		return nil, err
+	}
+	return &StateProof{Value: value, Proof: proof, Root: root}, nil
+}
+
 func (l *LedgerApi) GetMomentumsByHeight(height, count uint64) (*MomentumList, error) {
 	if height == 0 {
 		return nil, ErrHeightParamIsZero

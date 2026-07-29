@@ -28,6 +28,13 @@ func (c *rollbackTestChain) RollbackCacheTo(sync.Locker, types.HashHeight) error
 	return c.cacheRollbackErr
 }
 
+// InsertChain's failed-AddMomentumTransaction path (the RollbackCacheTo + TruncateStateTreeTo
+// pairing) is not covered in this package: c.supervisor is a concrete *vm.Supervisor, not an
+// interface, so there is no seam here to make AddMomentumTransaction fail without driving a
+// real vm.Supervisor/chain.Chain end to end. That invariant — the state tree frontier tracking
+// the chain frontier across a rollback — is covered against a real chain.Chain instead by
+// TestStateTree_TruncateAfterSpeculativeUpdateRestoresFrontier in chain/tests/state_tree_test.go.
+
 func TestRollbackSideChainCacheFailureIsUnrecoverable(t *testing.T) {
 	testChain := &rollbackTestChain{cacheRollbackErr: errors.New("cache rollback failed")}
 	bridge := chainBridge{chain: testChain}

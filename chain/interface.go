@@ -24,6 +24,7 @@ type Chain interface {
 	MomentumPool
 	MomentumEventManager
 	ChainCache
+	StateTree
 }
 
 type MomentumEventListener interface {
@@ -72,4 +73,20 @@ type ChainCache interface {
 	RollbackCacheTo(insertLocker sync.Locker, identifier types.HashHeight) error
 	GetCacheStore(identifier types.HashHeight) store.Cache
 	GetFrontierCacheStore() store.Cache
+}
+
+// StateTree is the chain's view of the versioned Merkleized state tree (spec §7.1). The
+// maintenance methods mirror ChainCache's lifecycle; ComputeStateRoot is the verifier's hook
+// (consumed via the narrower stateRootVerifier in the verifier package), while StateRoot and
+// GetProof back the proof RPC. The implementation lands in chain/state_tree.go (Phase 3).
+type StateTree interface {
+	UpdateStateTree(insertLocker sync.Locker, detailed *nom.DetailedMomentum, changes db.Patch) error
+	TruncateStateTreeTo(insertLocker sync.Locker, identifier types.HashHeight) error
+	StateRoot(identifier types.HashHeight) (types.Hash, error)
+	ComputeStateRoot(previous types.HashHeight, changes db.Patch) (types.Hash, error)
+	GetProof(identifier types.HashHeight, key []byte) (value []byte, proof []byte, err error)
+	// StateTreeReady reports whether the tree's build has reached the chain frontier. Before it
+	// flips true, the producer does not stamp v3 and the verifier fails closed on any v3
+	// momentum it cannot recompute — that rejection is the enforcement, not an absence of it.
+	StateTreeReady() bool
 }

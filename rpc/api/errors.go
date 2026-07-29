@@ -10,4 +10,6 @@ var (
 	ErrCountParamTooBig     = common.NewErrorWCode(-32000, "count parameter is too big")
 	ErrHeightParamIsZero    = common.NewErrorWCode(-32000, "height parameter must be strictly greater than zero")
 	ErrParamIsNull          = common.NewErrorWCode(-32000, "parameter must not be null")
+
+	ErrStateRootNotActivated = common.NewErrorWCode(-32000, "state root not available before its activation height")
 )

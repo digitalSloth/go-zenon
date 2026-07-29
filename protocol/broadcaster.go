@@ -40,6 +40,12 @@ func (b *broadcaster) CreateMomentum(momentumTransaction *nom.MomentumTransactio
 		b.log.Error("failed to insert own momentum to chain cache", "reason", err)
 		return
 	}
+	err = b.chain.UpdateStateTree(insert, detailed, momentumTransaction.Changes)
+	if err != nil {
+		insert.Unlock()
+		b.log.Error("failed to insert own momentum to state tree", "reason", err)
+		return
+	}
 	err = b.chain.AddMomentumTransaction(insert, momentumTransaction)
 	if err != nil {
 		var uncertain *chain.ErrCanonicalStateUncertain
@@ -51,6 +57,11 @@ func (b *broadcaster) CreateMomentum(momentumTransaction *nom.MomentumTransactio
 		if rollbackErr := b.chain.RollbackCacheTo(insert, momentumTransaction.Momentum.Previous()); rollbackErr != nil {
 			insert.Unlock()
 			b.log.Crit("cache rollback failed after failed momentum insertion, can't continue", "reason", rollbackErr, "cause", err)
+			os.Exit(2)
+		}
+		if truncateErr := b.chain.TruncateStateTreeTo(insert, momentumTransaction.Momentum.Previous()); truncateErr != nil {
+			insert.Unlock()
+			b.log.Crit("state tree truncate failed after failed momentum insertion, can't continue", "reason", truncateErr, "cause", err)
 			os.Exit(2)
 		}
 		insert.Unlock()
