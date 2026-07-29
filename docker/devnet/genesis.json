@@ -131,7 +131,7 @@
                 "name": "libp2p",
                 "description": "Activates the libp2p networking stack",
                 "activated": true,
-                "enforcementHeight": 20
+                "enforcementHeight": 10
             },
             {
                 "id": "0000000000000000000000000000000000000000000000000000000000000002",
@@ -139,6 +139,13 @@
                 "description": "Activates Dynamic Plasma",
                 "activated": true,
                 "enforcementHeight": 30
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000003",
+                "name": "merkle-state-root",
+                "description": "Activates the Merkle state root",
+                "activated": true,
+                "enforcementHeight": 40
             }
         ]
     },

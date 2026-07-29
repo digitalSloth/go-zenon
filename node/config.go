@@ -194,6 +194,11 @@ type Config struct {
 
 	LogLevel string // "debug", "dbug" | "info" | "warn" | "error", "error" | "crit"
 
+	// StateTreeArchive, when true, disables state-tree pruning so the node retains every
+	// version and can serve historical state proofs at any height (default false).
+	// Pruning is local-only and never affects consensus.
+	StateTreeArchive bool
+
 	Producer *ProducerConfig
 	RPC      RPCConfig
 	Net      NetConfig
@@ -246,6 +251,7 @@ func (c *Config) makeZenonConfig(walletManager *wallet.Manager) (*zenon.Config, 
 		GenesisConfig:     c.makeGenesisConfig(),
 		DataDir:           c.DataPath,
 		MaxSubscriptions:  c.RPC.MaxSubscriptions,
+		StateTreeArchive:  c.StateTreeArchive,
 	}, nil
 }
 func (c *Config) makeGenesisConfig() (genesisConfig store.Genesis) {

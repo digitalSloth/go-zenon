@@ -70,6 +70,7 @@ func TestInsertChain_MomentumBytesReplacePoolCopyOfSameBlock(t *testing.T) {
 	// byte-different copy of the same block.
 	insert := z.Chain().AcquireInsert("test rollback")
 	common.FailIfErr(t, z.Chain().RollbackTo(insert, momentum.Previous()))
+	common.FailIfErr(t, z.Chain().TruncateStateTreeTo(insert, momentum.Previous()))
 	insert.Unlock()
 
 	poolCopy := byteDifferentCopy(t, momentumCopy.Block)
@@ -142,6 +143,7 @@ func TestInsertChain_RejectsEmptyAndNilInput(t *testing.T) {
 		common.Expect(t, len(detailed.AccountBlocks), 1)
 		insert := z.Chain().AcquireInsert("test rollback")
 		common.FailIfErr(t, z.Chain().RollbackTo(insert, detailed.Momentum.Previous()))
+		common.FailIfErr(t, z.Chain().TruncateStateTreeTo(insert, detailed.Momentum.Previous()))
 		insert.Unlock()
 		before := z.Chain().GetFrontierMomentumStore().Identifier()
 

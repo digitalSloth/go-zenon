@@ -14,6 +14,7 @@ import (
 
 const (
 	DynamicPlasmaMomentumVersion = uint64(2)
+	StateRootMomentumVersion     = uint64(3)
 )
 
 var (
@@ -56,6 +57,8 @@ type Momentum struct {
 
 	NextFusionPrice uint64 `json:"nextFusionPrice" rlp:"optional"` // NextFusionPrice was added with the Dynamic Plasma spork
 	NextWorkPrice   uint64 `json:"nextWorkPrice" rlp:"optional"`   // NextWorkPrice was added with the Dynamic Plasma spork
+
+	StateRoot types.Hash `json:"stateRoot" rlp:"optional"` // StateRoot was added with the State Root spork; included in hash from version 3
 }
 
 type DetailedMomentum struct {
@@ -80,6 +83,12 @@ func (m *Momentum) ComputeHash() types.Hash {
 			common.Uint64ToBytes(m.NextFusionPrice),
 			common.Uint64ToBytes(m.NextWorkPrice),
 		)
+	}
+	if m.Version >= StateRootMomentumVersion {
+		// StateRoot is already a 32-byte hash, appended raw (unlike Data, which is
+		// wrapped in NewHash). Appended after the v2 price bytes, so v2 momentums hash
+		// exactly as before this field existed (backward-compatible by construction).
+		bytes = common.JoinBytes(bytes, m.StateRoot.Bytes())
 	}
 	return types.NewHash(bytes)
 }
@@ -116,7 +125,7 @@ func (m *Momentum) EnsureCache() {
 }
 
 func (m *Momentum) Proto() *MomentumProto {
-	return &MomentumProto{
+	pb := &MomentumProto{
 		Version:         m.Version,
 		ChainIdentifier: m.ChainIdentifier,
 		Hash:            m.Hash.Proto(),
@@ -131,6 +140,12 @@ func (m *Momentum) Proto() *MomentumProto {
 		NextFusionPrice: m.NextFusionPrice,
 		NextWorkPrice:   m.NextWorkPrice,
 	}
+	// Only emit StateRoot when populated, so pre-state-root momentums serialize exactly as
+	// before the field existed (the empty default leaves field 14 absent).
+	if !m.StateRoot.IsZero() {
+		pb.StateRoot = m.StateRoot.Bytes()
+	}
+	return pb
 }
 func DeProtoMomentum(pb *MomentumProto) (*Momentum, error) {
 	if pb == nil {
@@ -166,6 +181,11 @@ func DeProtoMomentum(pb *MomentumProto) (*Momentum, error) {
 		Signature:       pb.Signature,
 		NextFusionPrice: pb.NextFusionPrice,
 		NextWorkPrice:   pb.NextWorkPrice,
+	}
+	// StateRoot is absent (length 0) on pre-state-root and legacy-stored momentums; map it
+	// to the zero hash rather than DeProtoHash, which requires exactly 32 bytes.
+	if len(pb.StateRoot) != 0 {
+		m.StateRoot = types.BytesToHashPanic(pb.StateRoot)
 	}
 	m.EnsureCache()
 	return m, nil

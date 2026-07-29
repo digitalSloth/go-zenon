@@ -69,6 +69,8 @@ var (
 	ErrMChainIdentifierMissing  = errors.New("momentum chain-identifier is missing")
 	ErrMChainIdentifierMismatch = errors.New("momentum chain-identifier mismatch (belongs to another chain)")
 	ErrMDataMustBeZero          = errors.New("momentum data must be zero")
+	ErrMStateRootMustBeZero     = errors.New("momentum state-root must be zero before the state-root spork is active")
+	ErrMStateRootInvalid        = errors.New("momentum state-root is different than the one computed")
 	ErrMChangesHashInvalid      = errors.New("momentum changes-hash is different than the one computed")
 	ErrMHashInvalid             = errors.New("momentum hash is different than the one computed")
 	ErrMContentTooBig           = errors.New("momentum content is too big")

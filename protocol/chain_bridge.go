@@ -33,6 +33,12 @@ func (c chainBridge) rollbackSideChain(insert sync.Locker, identifier types.Hash
 			RollbackErr: err,
 		}
 	}
+	if err := c.chain.TruncateStateTreeTo(insert, identifier); err != nil {
+		return &chain.ErrCanonicalStateUncertain{
+			Cause:       errors.Errorf("canonical chain rolled back to %v but state tree rollback failed", identifier),
+			RollbackErr: err,
+		}
+	}
 	return nil
 }
 
@@ -323,6 +329,9 @@ func (c chainBridge) restoreBranch(insert sync.Locker, target types.HashHeight, 
 		if err := c.chain.UpdateCache(insert, momentum.Detailed, momentum.Changes); err != nil {
 			return errors.Errorf("unable to restore cache for %v. Reason:%v", momentum.Detailed.Momentum.Identifier(), err)
 		}
+		if err := c.chain.UpdateStateTree(insert, momentum.Detailed, momentum.Changes); err != nil {
+			return errors.Errorf("unable to restore state tree for %v. Reason:%v", momentum.Detailed.Momentum.Identifier(), err)
+		}
 		transaction := &nom.MomentumTransaction{Momentum: momentum.Detailed.Momentum, Changes: momentum.Changes}
 		if err := c.chain.AddMomentumTransaction(insert, transaction); err != nil {
 			return errors.Errorf("unable to restore momentum %v. Reason:%v", momentum.Detailed.Momentum.Identifier(), err)
@@ -480,6 +489,10 @@ func (c chainBridge) insertMomentum(insert sync.Locker, detailed *nom.DetailedMo
 		log.Error("error while inserting cache", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
 		return err
 	}
+	if err := c.chain.UpdateStateTree(insert, detailed, transaction.Changes); err != nil {
+		log.Error("error while inserting state tree", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
+		return err
+	}
 	if err := c.chain.AddMomentumTransaction(insert, transaction); err != nil {
 		log.Error("error while inserting momentum", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
 		var uncertain *chain.ErrCanonicalStateUncertain
@@ -489,14 +502,18 @@ func (c chainBridge) insertMomentum(insert sync.Locker, detailed *nom.DetailedMo
 		}
 		if c.chain.GetFrontierMomentumStore().Identifier() != frontierBefore {
 			// The momentum is on the canonical chain although the call
-			// reported an error, so the cache state applied above belongs
+			// reported an error, so the cache and state tree state applied above belong
 			// to the chain as it now is and stays; the caller skips the
 			// pool restore for the same reason.
-			log.Error("momentum committed despite insert error; keeping its cache state", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
+			log.Error("momentum committed despite insert error; keeping its cache and state tree", "reason", err, "momentum-identifier", detailed.Momentum.Identifier())
 			return err
 		}
 		if rollbackErr := c.chain.RollbackCacheTo(insert, detailed.Momentum.Previous()); rollbackErr != nil {
 			log.Crit("cache rollback failed after failed momentum insertion, can't continue", "reason", rollbackErr, "cause", err, "momentum-identifier", detailed.Momentum.Identifier())
+			os.Exit(2)
+		}
+		if truncateErr := c.chain.TruncateStateTreeTo(insert, detailed.Momentum.Previous()); truncateErr != nil {
+			log.Crit("state tree truncate failed after failed momentum insertion, can't continue", "reason", truncateErr, "cause", err, "momentum-identifier", detailed.Momentum.Identifier())
 			os.Exit(2)
 		}
 		return err

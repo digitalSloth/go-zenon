@@ -33,6 +33,9 @@ func TestRollbackEvictsOrphanedReceive(t *testing.T) {
 
 	insert := z.Chain().AcquireInsert("rollback orphan test")
 	err := z.Chain().RollbackTo(insert, before)
+	if err == nil {
+		err = z.Chain().TruncateStateTreeTo(insert, before)
+	}
 	insert.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +109,9 @@ func TestRollbackKeepsUnrelatedPending(t *testing.T) {
 	// Rollback M5 only.
 	insert := z.Chain().AcquireInsert("rollback keep unrelated")
 	err := z.Chain().RollbackTo(insert, before)
+	if err == nil {
+		err = z.Chain().TruncateStateTreeTo(insert, before)
+	}
 	insert.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +182,9 @@ func TestRollbackReplacesMomentum_DropsStaleAcknowledged(t *testing.T) {
 	// User1's manager survives DeleteMomentum.
 	insert := z.Chain().AcquireInsert("rollback fork test")
 	err := z.Chain().RollbackTo(insert, m3)
+	if err == nil {
+		err = z.Chain().TruncateStateTreeTo(insert, m3)
+	}
 	insert.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +266,9 @@ func TestRollbackCanonicalAck_KeepsValidPending(t *testing.T) {
 	// Rollback to m4 (removes m5 only).  m4 is still canonical.
 	insert := z.Chain().AcquireInsert("rollback canonical ack")
 	err := z.Chain().RollbackTo(insert, m4)
+	if err == nil {
+		err = z.Chain().TruncateStateTreeTo(insert, m4)
+	}
 	insert.Unlock()
 	if err != nil {
 		t.Fatal(err)

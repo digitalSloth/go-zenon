@@ -50,7 +50,7 @@ func TestChainStopStopsEveryManagerAfterCacheError(t *testing.T) {
 	cacheErr := errors.New("cache close failed")
 	cacheManager := &stopRecordingCacheManager{stopErr: cacheErr}
 	chainManager := &stopRecordingManager{}
-	c := NewChain(chainManager, cacheManager, nil)
+	c := NewChain(chainManager, cacheManager, nil, "", false)
 
 	err := c.Stop()
 	if !errors.Is(err, cacheErr) {
@@ -66,7 +66,7 @@ func TestChainStopStopsEveryManagerAfterCacheError(t *testing.T) {
 func TestChainStopReportsEveryManagerError(t *testing.T) {
 	cacheErr := errors.New("cache close failed")
 	chainErr := errors.New("chain close failed")
-	c := NewChain(&stopRecordingManager{stopErr: chainErr}, &stopRecordingCacheManager{stopErr: cacheErr}, nil)
+	c := NewChain(&stopRecordingManager{stopErr: chainErr}, &stopRecordingCacheManager{stopErr: cacheErr}, nil, "", false)
 
 	err := c.Stop()
 	if !errors.Is(err, cacheErr) || !errors.Is(err, chainErr) {

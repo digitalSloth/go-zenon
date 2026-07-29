@@ -160,6 +160,10 @@ func (zenon *mockZenon) CreateMomentum(momentumTransaction *nom.MomentumTransact
 	if err != nil {
 		panic(fmt.Errorf("failed to insert own momentum to chain cache. reason:%w", err))
 	}
+	err = zenon.chain.UpdateStateTree(insert, detailed, momentumTransaction.Changes)
+	if err != nil {
+		panic(fmt.Errorf("failed to insert own momentum to state tree. reason:%w", err))
+	}
 	err = zenon.chain.AddMomentumTransaction(insert, momentumTransaction)
 	if err != nil {
 		panic(fmt.Errorf("failed to insert own momentum. reason:%w", err))
@@ -406,7 +410,7 @@ func newMockZenon(t common.T, customEpochDuration time.Duration) MockZenon {
 	common.SupervisorLogger.SetHandler(log15.LvlFilterHandler(log15.LvlError, log15.StderrHandler))
 	consensus.EpochDuration = customEpochDuration
 
-	ch := chain.NewChain(db.NewLevelDBManager(t.TempDir()), cache.NewCacheDBManager(t.TempDir()), genesis.NewGenesis(g.EmbeddedGenesis))
+	ch := chain.NewChain(db.NewLevelDBManager(t.TempDir()), cache.NewCacheDBManager(t.TempDir()), genesis.NewGenesis(g.EmbeddedGenesis), t.TempDir(), false)
 	cs := consensus.NewConsensus(db.NewMemDB(), ch, true)
 	supervisor := vm.NewSupervisor(ch, cs)
 	zenon := &mockZenon{

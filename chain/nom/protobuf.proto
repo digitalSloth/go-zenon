@@ -50,4 +50,5 @@ message MomentumProto {
   bytes signature = 11;
   uint64 nextFusionPrice = 12;
   uint64 nextWorkPrice = 13;
+  bytes stateRoot = 14;
 }

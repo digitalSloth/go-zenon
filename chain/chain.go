@@ -27,13 +27,14 @@ type chain struct {
 	*momentumPool
 	*momentumEventManager
 	*chainCache
+	*stateTree
 
 	chainManager db.Manager
 	cacheManager storage.CacheManager
 	insert       sync.Mutex
 }
 
-func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesis store.Genesis) *chain {
+func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesis store.Genesis, stateTreeDir string, stateTreeArchive bool) *chain {
 	momentumPool := NewMomentumPool(chainManager, genesis)
 	cache := NewChainCache(cacheManager)
 	return &chain{
@@ -43,6 +44,7 @@ func NewChain(chainManager db.Manager, cacheManager storage.CacheManager, genesi
 		momentumPool:         momentumPool,
 		momentumEventManager: momentumPool.momentumEventManager,
 		chainCache:           cache,
+		stateTree:            newStateTree(stateTreeDir, stateTreeArchive),
 		chainManager:         chainManager,
 		cacheManager:         cacheManager,
 	}
@@ -76,6 +78,10 @@ func (c *chain) Init() error {
 		return err
 	}
 
+	if err := c.stateTree.Init(c.chainManager, frontierStore); err != nil {
+		return err
+	}
+
 	fmt.Printf("Initialized NoM. Height: %v, Hash: %v\n", frontier.Height, frontier.Hash)
 	c.log.Info("initialized nom", "identifier", frontier.Identifier())
 
@@ -103,6 +109,8 @@ func (c *chain) Start() error {
 	c.log.Info("starting ...")
 	defer c.log.Info("started")
 
+	c.stateTree.startBuild(c)
+
 	return nil
 }
 func (c *chain) Stop() error {
@@ -115,7 +123,7 @@ func (c *chain) Stop() error {
 	// marks itself stopped even when its Close fails, so bailing out on the
 	// first error would leave the remaining handles open until exit. The
 	// caller sees every error that occurred.
-	return stderrors.Join(c.cacheManager.Stop(), c.chainManager.Stop())
+	return stderrors.Join(c.stateTree.stop(), c.cacheManager.Stop(), c.chainManager.Stop())
 }
 
 func (c *chain) checkGenesisCompatibility() error {

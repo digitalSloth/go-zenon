@@ -224,6 +224,7 @@ func rollBackFrontier(t *testing.T, z mock.MockZenon, momentum *nom.Momentum) {
 	common.Expect(t, z.Chain().GetFrontierMomentumStore().Identifier(), momentum.Identifier())
 	insert := z.Chain().AcquireInsert("test rollback")
 	common.FailIfErr(t, z.Chain().RollbackTo(insert, momentum.Previous()))
+	common.FailIfErr(t, z.Chain().TruncateStateTreeTo(insert, momentum.Previous()))
 	common.FailIfErr(t, z.Chain().RollbackCacheTo(insert, momentum.Previous()))
 	insert.Unlock()
 	common.Expect(t, z.Chain().GetFrontierMomentumStore().Identifier(), momentum.Previous())

@@ -82,6 +82,7 @@ func newRestoreFixtureWith(t *testing.T, twoBlocks bool) *restoreFixture {
 
 	insert := z.Chain().AcquireInsert("test rollback")
 	common.FailIfErr(t, z.Chain().RollbackTo(insert, f.previous))
+	common.FailIfErr(t, z.Chain().TruncateStateTreeTo(insert, f.previous))
 	insert.Unlock()
 	return f
 }
