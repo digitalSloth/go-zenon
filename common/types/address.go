@@ -110,6 +110,10 @@ var (
 	// governance contract is taken into use. The address belongs to
 	// the Mariposa01 pillar.
 	CommunitySporkAddress = ParseAddressPanic("z1qqvwzz2xq7q5gwk6uhcddgrpxlfcyzc8rsu82s")
+
+	// NetworkAdmin is the single global authority that gates administrator-only
+	// methods. It currently holds the same value as CommunitySporkAddress.
+	NetworkAdmin = CommunitySporkAddress
 )
 
 // IsEmbeddedAddress reports whether addr belongs to the

@@ -44,13 +44,21 @@ var (
 	// pre-mainnet; finalize before mainnet
 	MaxBatchWithdrawalCeiling = new(big.Int).Mul(big.NewInt(1_000_000), big.NewInt(Decimals))
 
+	// MaxInputGas is the ceiling on a CallL2 or Deposit plasma_limit, and so on the
+	// L2 gas budget one input can authorize. It is sized from the batch rather than
+	// the input: an honest executor's worst case is MaxBatchInputs * MaxInputGas.
+	//
+	// It stays below math.MaxInt64 so every admissible budget fits a signed 64-bit
+	// metering ledger, which is what lets the runtime forbid clamping: a budget it
+	// cannot represent is one Settlement would not have admitted.
+	//
+	// pre-mainnet; finalize before mainnet
+	MaxInputGas = uint64(1_000_000_000)
+
 	// Reserved (MINTED only) — symmetric to MaxBatchWithdrawal, unused in Phase 1.
 	MaxBatchMintFloor = big.NewInt(1)
 	// pre-mainnet; finalize before mainnet
 	MaxBatchMintCeiling = new(big.Int).Set(MaxBatchWithdrawalCeiling)
-
-	// valueCaps rolling-window floor, must be >= WithdrawalDelay.
-	ValueCapWindowFloor = WithdrawalDelayMin
 )
 
 // IsWithdrawalDelayInBounds reports whether a withdrawal-delay/challenge-window
@@ -75,8 +83,23 @@ func IsRuntimeUpgradeDelayValid(upgradeDelay, activeWithdrawalDelay uint64) bool
 	return upgradeDelay >= activeWithdrawalDelay
 }
 
-// IsValueCapWindowInBounds reports whether a valueCaps rolling-window
-// duration (momentum heights) is within the enforced hard bound.
-func IsValueCapWindowInBounds(window uint64) bool {
-	return window >= ValueCapWindowFloor
+// IsInputGasInBounds reports whether a CallL2 or Deposit plasma_limit is within
+// the ceiling on one input's L2 gas budget. A send exceeding it is rejected at
+// send validation and never becomes an input.
+func IsInputGasInBounds(plasmaLimit uint64) bool {
+	return plasmaLimit <= MaxInputGas
+}
+
+// IsValueCapWindowValid reports whether a valueCaps rolling-window duration
+// (momentum heights) satisfies the mandatory floor relative to the withdrawal
+// delay in force.
+//
+// The floor is the active withdrawal delay rather than a fixed constant, so a
+// long withdrawal delay cannot be paired with a short window to spread
+// withdrawals across micro-windows and bypass the cap. Symmetric to
+// IsRuntimeUpgradeDelayValid, and evaluated against the withdrawal delay in
+// force after the configuring call: when both values are set in the same call,
+// against the delay being set, not the one it replaces.
+func IsValueCapWindowValid(window, activeWithdrawalDelay uint64) bool {
+	return window >= activeWithdrawalDelay
 }
