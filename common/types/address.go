@@ -46,6 +46,10 @@ var (
 
 	// TODO: Update governance address to governance contract
 	GovernanceAddress = ParseAddressPanic("z1qq9n7fpaqd8lpcljandzmx4xtku9w4ftwyg0mq")
+
+	// NetworkAdmin is the single global authority that gates administrator-only
+	// methods. It currently holds the same value as CommunitySporkAddress.
+	NetworkAdmin = CommunitySporkAddress
 )
 
 func IsEmbeddedAddress(addr Address) bool {
