@@ -151,7 +151,7 @@ func TestBatchEntry_RoundTrip(t *testing.T) {
 		OutboxRoot:        hashFromByte(0x15),
 		DaHash:            hashFromByte(0x16),
 		DaMode:            1,
-		ExecutorId:        0,
+		ExecutorIndex:     0,
 		SubmittedAtHeight: 12345,
 		AssetFlowSummary:  []byte("asset-flow-summary-blob"),
 		ProofData:         []byte{},
@@ -173,7 +173,7 @@ func TestBatchEntry_RoundTrip(t *testing.T) {
 		got.PostStateRoot != entry.PostStateRoot || got.InputRoot != entry.InputRoot ||
 		got.ReceiptRoot != entry.ReceiptRoot || got.EventRoot != entry.EventRoot ||
 		got.OutboxRoot != entry.OutboxRoot || got.DaHash != entry.DaHash ||
-		got.DaMode != entry.DaMode || got.ExecutorId != entry.ExecutorId ||
+		got.DaMode != entry.DaMode || got.ExecutorIndex != entry.ExecutorIndex ||
 		got.SubmittedAtHeight != entry.SubmittedAtHeight || got.State != entry.State {
 		t.Fatalf("field mismatch: got %+v want %+v", got, entry)
 	}
@@ -383,6 +383,9 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"messageState":           messageStatePrefix,
 		"fraudRefereeRegistry":   fraudRefereeRegistryPrefix,
 		"validityKeyRegistry":    validityKeyRegistryPrefix,
+		"globalPauseState":       globalPauseStateKey,
+		"domainPauseState":       domainPauseStatePrefix,
+		"escapeHatch":            escapeHatchPrefix,
 	}
 
 	seen := make(map[byte]string, len(prefixes))
@@ -426,14 +429,15 @@ func TestInputSequenceCursor_RoundTrip(t *testing.T) {
 func TestExecutorBond_RoundTrip(t *testing.T) {
 	memDb := db.DisableNotFound(db.NewMemDB())
 	domainId := uint32(11)
+	executor := addressFromByte(0x90)
 
-	if _, err := GetExecutorBond(memDb, domainId); err != constants.ErrDataNonExistent {
+	if _, err := GetExecutorBond(memDb, domainId, executor); err != constants.ErrDataNonExistent {
 		t.Fatalf("expected ErrDataNonExistent, got %v", err)
 	}
 
 	bond := &ExecutorBond{
 		DomainId:  domainId,
-		Executor:  addressFromByte(0x90),
+		Executor:  executor,
 		ZnnAmount: big.NewInt(1000),
 		QsrAmount: big.NewInt(2000),
 		Status:    ExecutorStatusActive,
@@ -441,11 +445,12 @@ func TestExecutorBond_RoundTrip(t *testing.T) {
 	if err := bond.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
-	got, err := GetExecutorBond(memDb, domainId)
+	got, err := GetExecutorBond(memDb, domainId, executor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Executor != bond.Executor || got.ZnnAmount.Cmp(bond.ZnnAmount) != 0 ||
+	if got.DomainId != domainId || got.Executor != bond.Executor ||
+		got.ZnnAmount.Cmp(bond.ZnnAmount) != 0 ||
 		got.QsrAmount.Cmp(bond.QsrAmount) != 0 || got.Status != bond.Status {
 		t.Fatalf("executor bond mismatch: got %+v want %+v", got, bond)
 	}
@@ -453,8 +458,62 @@ func TestExecutorBond_RoundTrip(t *testing.T) {
 	if err := bond.Delete(memDb); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := GetExecutorBond(memDb, domainId); err != constants.ErrDataNonExistent {
+	if _, err := GetExecutorBond(memDb, domainId, executor); err != constants.ErrDataNonExistent {
 		t.Fatalf("expected ErrDataNonExistent after delete, got %v", err)
+	}
+}
+
+// Registering a replacement executor leaves the outgoing executor's bond record
+// readable under its own address, which is what RevokeBond needs to return that
+// executor's legs.
+func TestExecutorBond_ReplacementDoesNotStrandOutgoingBond(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	domainId := uint32(11)
+	outgoing := addressFromByte(0x90)
+	incoming := addressFromByte(0x91)
+
+	outgoingBond := &ExecutorBond{
+		DomainId:  domainId,
+		Executor:  outgoing,
+		ZnnAmount: big.NewInt(1000),
+		QsrAmount: big.NewInt(2000),
+		Status:    ExecutorStatusActive,
+	}
+	if err := outgoingBond.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+
+	incomingBond := &ExecutorBond{
+		DomainId:  domainId,
+		Executor:  incoming,
+		ZnnAmount: big.NewInt(3000),
+		QsrAmount: big.NewInt(4000),
+		Status:    ExecutorStatusRegistered,
+	}
+	if err := incomingBond.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := GetExecutorBond(memDb, domainId, outgoing)
+	if err != nil {
+		t.Fatalf("outgoing bond stranded by the replacement: %v", err)
+	}
+	if got.Executor != outgoing || got.ZnnAmount.Cmp(big.NewInt(1000)) != 0 ||
+		got.QsrAmount.Cmp(big.NewInt(2000)) != 0 || got.Status != ExecutorStatusActive {
+		t.Fatalf("outgoing bond overwritten: got %+v", got)
+	}
+
+	got, err = GetExecutorBond(memDb, domainId, incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Executor != incoming || got.ZnnAmount.Cmp(big.NewInt(3000)) != 0 {
+		t.Fatalf("incoming bond mismatch: got %+v", got)
+	}
+
+	// The same executor address under a different domain is a different record.
+	if _, err := GetExecutorBond(memDb, domainId+1, outgoing); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected per-domain isolation, got %v", err)
 	}
 }
 
@@ -466,11 +525,10 @@ func TestPeripheryConfig_RoundTrip(t *testing.T) {
 	}
 
 	config := &PeripheryConfig{
-		Administrator:           addressFromByte(0xA0),
-		EmergencyPauseAuthority: addressFromByte(0xA1),
-		WithdrawalDelay:         1234,
-		MaxBatchWithdrawal:      big.NewInt(56789),
-		Reserved:                []byte("reserved-blob"),
+		WithdrawalDelay:     1234,
+		MaxBatchWithdrawal:  big.NewInt(56789),
+		RuntimeUpgradeDelay: 2345,
+		Reserved:            []byte("reserved-blob"),
 	}
 	if err := config.Save(memDb); err != nil {
 		t.Fatal(err)
@@ -479,10 +537,130 @@ func TestPeripheryConfig_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Administrator != config.Administrator || got.EmergencyPauseAuthority != config.EmergencyPauseAuthority ||
-		got.WithdrawalDelay != config.WithdrawalDelay || got.MaxBatchWithdrawal.Cmp(config.MaxBatchWithdrawal) != 0 ||
+	if got.WithdrawalDelay != config.WithdrawalDelay || got.MaxBatchWithdrawal.Cmp(config.MaxBatchWithdrawal) != 0 ||
+		got.RuntimeUpgradeDelay != config.RuntimeUpgradeDelay ||
 		string(got.Reserved) != string(config.Reserved) {
 		t.Fatalf("periphery config mismatch: got %+v want %+v", got, config)
+	}
+}
+
+func TestPauseState_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	// absent decodes to {false,false}, no error
+	globalZero, err := GetGlobalPauseState(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if globalZero.SubmitPaused || globalZero.RelayPaused {
+		t.Fatalf("expected zero-default global pause state, got %+v", globalZero)
+	}
+	domainZero, err := GetDomainPauseState(memDb, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domainZero.SubmitPaused || domainZero.RelayPaused {
+		t.Fatalf("expected zero-default domain pause state, got %+v", domainZero)
+	}
+
+	global := &PauseState{SubmitPaused: true, RelayPaused: false}
+	if err := global.SaveGlobal(memDb); err != nil {
+		t.Fatal(err)
+	}
+	gotGlobal, err := GetGlobalPauseState(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotGlobal.SubmitPaused || gotGlobal.RelayPaused {
+		t.Fatalf("global pause state mismatch: got %+v", gotGlobal)
+	}
+
+	domain := &PauseState{SubmitPaused: false, RelayPaused: true}
+	if err := domain.SaveDomain(memDb, 7); err != nil {
+		t.Fatal(err)
+	}
+	gotDomain, err := GetDomainPauseState(memDb, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDomain.SubmitPaused || !gotDomain.RelayPaused {
+		t.Fatalf("domain pause state mismatch: got %+v", gotDomain)
+	}
+
+	// another domain remains unaffected
+	otherDomain, err := GetDomainPauseState(memDb, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherDomain.SubmitPaused || otherDomain.RelayPaused {
+		t.Fatalf("expected domain 8 unaffected, got %+v", otherDomain)
+	}
+}
+
+func TestIsSubmitPaused_IsRelayPaused(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	submitPaused, err := IsSubmitPaused(memDb, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitPaused {
+		t.Fatal("expected SUBMIT not paused before any pause")
+	}
+	relayPaused, err := IsRelayPaused(memDb, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relayPaused {
+		t.Fatal("expected RELAY not paused before any pause")
+	}
+
+	// global SUBMIT pause affects any domain, RELAY stays independent
+	global := &PauseState{SubmitPaused: true}
+	if err := global.SaveGlobal(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if paused, err := IsSubmitPaused(memDb, 1); err != nil || !paused {
+		t.Fatalf("expected SUBMIT paused globally, got %v err %v", paused, err)
+	}
+	if paused, err := IsRelayPaused(memDb, 1); err != nil || paused {
+		t.Fatalf("expected RELAY unaffected by global SUBMIT pause, got %v err %v", paused, err)
+	}
+
+	// per-domain RELAY pause only affects that domain
+	domain := &PauseState{RelayPaused: true}
+	if err := domain.SaveDomain(memDb, 2); err != nil {
+		t.Fatal(err)
+	}
+	if paused, err := IsRelayPaused(memDb, 2); err != nil || !paused {
+		t.Fatalf("expected RELAY paused for domain 2, got %v err %v", paused, err)
+	}
+	if paused, err := IsRelayPaused(memDb, 3); err != nil || paused {
+		t.Fatalf("expected RELAY unaffected for domain 3, got %v err %v", paused, err)
+	}
+	if paused, err := IsSubmitPaused(memDb, 3); err != nil || !paused {
+		t.Fatalf("expected SUBMIT still paused globally for domain 3, got %v err %v", paused, err)
+	}
+}
+
+func TestEscapeHatchRecord_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	domainId := uint32(3)
+
+	if _, err := GetEscapeHatchRecord(memDb, domainId); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent, got %v", err)
+	}
+
+	record := &EscapeHatchRecord{DomainId: domainId, TriggeredAtHeight: 4242}
+	if err := record.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetEscapeHatchRecord(memDb, domainId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DomainId != domainId || got.TriggeredAtHeight != record.TriggeredAtHeight {
+		t.Fatalf("escape hatch record mismatch: got %+v want %+v", got, record)
 	}
 }
 

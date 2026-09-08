@@ -72,7 +72,10 @@ func applyHtlcDiffs(contracts map[types.Address]*embeddedImplementation) {
 func applySettlementDiffs(contracts map[types.Address]*embeddedImplementation) {
 	contracts[types.SettlementContract] = &embeddedImplementation{
 		map[string]Method{
-			cabi.SettlementUpdateMethodName: &implementation.SettlementUpdateMethod{MethodName: cabi.SettlementUpdateMethodName},
+			cabi.SettlementUpdateMethodName:              &implementation.SettlementUpdateMethod{MethodName: cabi.SettlementUpdateMethodName},
+			cabi.SettlementSetPeripheryConfigMethodName:  &implementation.SettlementSetPeripheryConfigMethod{MethodName: cabi.SettlementSetPeripheryConfigMethodName},
+			cabi.SettlementPauseMethodName:               &implementation.SettlementPauseMethod{MethodName: cabi.SettlementPauseMethodName},
+			cabi.SettlementInitiateEscapeHatchMethodName: &implementation.SettlementInitiateEscapeHatchMethod{MethodName: cabi.SettlementInitiateEscapeHatchMethodName},
 		},
 		cabi.ABISettlement,
 	}
