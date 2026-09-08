@@ -1,6 +1,7 @@
 package constants
 
 import (
+	"math"
 	"math/big"
 	"testing"
 )
@@ -49,14 +50,49 @@ func TestIsRuntimeUpgradeDelayValid(t *testing.T) {
 	}
 }
 
-func TestIsValueCapWindowInBounds(t *testing.T) {
-	if !IsValueCapWindowInBounds(ValueCapWindowFloor) {
-		t.Fatal("expected floor to be in bounds")
+func TestIsValueCapWindowValid(t *testing.T) {
+	if !IsValueCapWindowValid(100, 100) {
+		t.Fatal("expected window equal to the active withdrawal delay to be valid")
 	}
-	if !IsValueCapWindowInBounds(ValueCapWindowFloor + 1) {
-		t.Fatal("expected above floor to be in bounds")
+	if !IsValueCapWindowValid(101, 100) {
+		t.Fatal("expected window above the active withdrawal delay to be valid")
 	}
-	if IsValueCapWindowInBounds(ValueCapWindowFloor - 1) {
-		t.Fatal("expected below floor to be rejected")
+	if IsValueCapWindowValid(99, 100) {
+		t.Fatal("expected window < activeWithdrawalDelay to be rejected")
+	}
+
+	// The floor tracks the delay in force: the same window that is valid against
+	// a short delay is rejected against a longer one.
+	window := WithdrawalDelayMin
+	if !IsValueCapWindowValid(window, WithdrawalDelayMin) {
+		t.Fatal("expected window to be valid against the minimum delay")
+	}
+	if IsValueCapWindowValid(window, WithdrawalDelayMin*2) {
+		t.Fatal("expected the same window to be rejected against a longer active delay")
+	}
+}
+
+func TestIsInputGasInBounds(t *testing.T) {
+	if !IsInputGasInBounds(0) {
+		t.Fatal("expected a zero budget to be in bounds")
+	}
+	if !IsInputGasInBounds(MaxInputGas) {
+		t.Fatal("expected the ceiling itself to be in bounds")
+	}
+	if IsInputGasInBounds(MaxInputGas + 1) {
+		t.Fatal("expected a budget above the ceiling to be rejected")
+	}
+
+	// The ceiling keeps every admissible budget inside a signed 64-bit metering
+	// ledger, which is what lets the runtime treat a larger budget as impossible
+	// rather than clamping it.
+	if MaxInputGas >= uint64(math.MaxInt64) {
+		t.Fatalf("MaxInputGas = %d, must stay below math.MaxInt64", MaxInputGas)
+	}
+
+	// A worst-case batch is MaxBatchInputs inputs each at the ceiling; that product
+	// must not wrap.
+	if MaxInputGas > math.MaxUint64/uint64(MaxBatchInputs) {
+		t.Fatalf("MaxBatchInputs * MaxInputGas overflows uint64")
 	}
 }

@@ -17,7 +17,20 @@ import (
 const (
 	jsonSettlement = `
 	[
-		{"type":"function","name":"Update","inputs":[]},
+		{"type":"function","name":"Update","inputs":[
+			{"name":"domainId","type":"uint32"}]},
+
+		{"type":"function","name":"SetPeripheryConfig","inputs":[
+			{"name":"withdrawalDelay","type":"uint64"},
+			{"name":"maxBatchWithdrawal","type":"uint256"},
+			{"name":"runtimeUpgradeDelay","type":"uint64"}]},
+		{"type":"function","name":"Pause","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"isGlobal","type":"bool"},
+			{"name":"scope","type":"uint8"},
+			{"name":"active","type":"bool"}]},
+		{"type":"function","name":"InitiateEscapeHatch","inputs":[
+			{"name":"domainId","type":"uint32"}]},
 
 		{"type":"variable","name":"domainRecord","inputs":[
 			{"name":"domainClass","type":"uint8"},
@@ -48,7 +61,7 @@ const (
 			{"name":"outboxRoot","type":"hash"},
 			{"name":"daHash","type":"hash"},
 			{"name":"daMode","type":"uint8"},
-			{"name":"executorId","type":"uint8"},
+			{"name":"executorIndex","type":"uint8"},
 			{"name":"submittedAtHeight","type":"uint64"},
 			{"name":"assetFlowSummary","type":"bytes"},
 			{"name":"proofData","type":"bytes"},
@@ -100,18 +113,25 @@ const (
 		]},
 
 		{"type":"variable","name":"executorBond","inputs":[
-			{"name":"executor","type":"address"},
 			{"name":"znnAmount","type":"uint256"},
 			{"name":"qsrAmount","type":"uint256"},
 			{"name":"status","type":"uint8"}
 		]},
 
 		{"type":"variable","name":"peripheryConfig","inputs":[
-			{"name":"administrator","type":"address"},
-			{"name":"emergencyPauseAuthority","type":"address"},
 			{"name":"withdrawalDelay","type":"uint64"},
 			{"name":"maxBatchWithdrawal","type":"uint256"},
+			{"name":"runtimeUpgradeDelay","type":"uint64"},
 			{"name":"reserved","type":"bytes"}
+		]},
+
+		{"type":"variable","name":"pauseState","inputs":[
+			{"name":"submitPaused","type":"bool"},
+			{"name":"relayPaused","type":"bool"}
+		]},
+
+		{"type":"variable","name":"escapeHatchRecord","inputs":[
+			{"name":"triggeredAtHeight","type":"uint64"}
 		]},
 
 		{"type":"variable","name":"assetRegistryEntry","inputs":[
@@ -136,6 +156,9 @@ const (
 
 	SettlementUpdateMethodName = "Update"
 
+	SettlementSetPeripheryConfigMethodName  = "SetPeripheryConfig"
+	SettlementInitiateEscapeHatchMethodName = "InitiateEscapeHatch"
+
 	// declared for Tickets 11+, not yet wired
 	SettlementRegisterDomainMethodName = "RegisterDomain"
 	// declared for Tickets 11+, not yet wired
@@ -150,7 +173,7 @@ const (
 	SettlementSubmitBatchMethodName = "SubmitBatch"
 	// declared for Tickets 11+, not yet wired
 	SettlementRelayMessageMethodName = "RelayMessage"
-	// declared for Tickets 11+, not yet wired
+
 	SettlementPauseMethodName = "Pause"
 	// declared for Tickets 11+, not yet wired
 	SettlementCallL2MethodName = "CallL2"
@@ -175,6 +198,8 @@ const (
 	deployRecordVariableName              = "deployRecord"
 	executorBondVariableName              = "executorBond"
 	peripheryConfigVariableName           = "peripheryConfig"
+	pauseStateVariableName                = "pauseState"
+	escapeHatchRecordVariableName         = "escapeHatchRecord"
 	assetRegistryEntryVariableName        = "assetRegistryEntry"
 	messageStateVariableName              = "messageState"
 	fraudRefereeRegistryEntryVariableName = "fraudRefereeRegistryEntry"
@@ -248,6 +273,12 @@ const (
 	ExecutorStatusActive
 )
 
+// Pause scopes
+const (
+	PauseScopeSubmit uint8 = iota // halts SubmitBatch (Ticket 15)
+	PauseScopeRelay               // halts RelayMessage registration + Update release (Ticket 16)
+)
+
 var (
 	ABISettlement = abi.JSONToABIContract(strings.NewReader(jsonSettlement))
 
@@ -266,12 +297,15 @@ var (
 	releaseQueueMetaPrefix       = []byte{0x09} // key: domainId
 	deployRecordPrefix           = []byte{0x0A} // key: domainId ‖ codeHash (32B)
 	processedOutboxPrefix        = []byte{0x0B} // key: outboxId (32B)
-	executorBondPrefix           = []byte{0x0C} // key: domainId
+	executorBondPrefix           = []byte{0x0C} // key: domainId ‖ executorAddress
 	peripheryConfigKey           = []byte{0x0D} // singleton
 	assetRegistryPrefix          = []byte{0x0E} // reserved, key: domainId ‖ assetId (32B)
 	messageStatePrefix           = []byte{0x0F} // reserved, key: outboxId (32B)
 	fraudRefereeRegistryPrefix   = []byte{0x10} // reserved, key: domainId
 	validityKeyRegistryPrefix    = []byte{0x11} // reserved, key: verifyingKeyId (32B)
+	globalPauseStateKey          = []byte{0x12} // PauseState, singleton
+	domainPauseStatePrefix       = []byte{0x13} // PauseState, key: domainId (u32 BE)
+	escapeHatchPrefix            = []byte{0x14} // EscapeHatchRecord, key: domainId (u32 BE)
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -407,7 +441,7 @@ type BatchEntry struct {
 	OutboxRoot        types.Hash
 	DaHash            types.Hash
 	DaMode            uint8
-	ExecutorId        uint8
+	ExecutorIndex     uint8
 	SubmittedAtHeight uint64
 	AssetFlowSummary  []byte
 	ProofData         []byte
@@ -428,7 +462,7 @@ func (b *BatchEntry) Save(context db.DB) error {
 		b.OutboxRoot,
 		b.DaHash,
 		b.DaMode,
-		b.ExecutorId,
+		b.ExecutorIndex,
 		b.SubmittedAtHeight,
 		b.AssetFlowSummary,
 		b.ProofData,
@@ -961,8 +995,14 @@ func IsOutboxProcessed(context db.DB, outboxId types.Hash) (bool, error) {
 // Executor registration + bond (per domain)
 // ============================================================================
 
-func getExecutorBondKey(domainId uint32) []byte {
-	return common.JoinBytes(executorBondPrefix, uint32ToBytesBE(domainId))
+// The bond is keyed by (domainId, executorAddress). Registering a replacement
+// executor for a domain leaves the outgoing executor's record in place under its
+// own address, which is what lets that executor reclaim both legs once it is no
+// longer the domain's registered executor and every batch it submitted has
+// finalized. Both key fields are recovered from the key rather than stored in the
+// value, as DomainRecord and BatchEntry do.
+func getExecutorBondKey(domainId uint32, executor types.Address) []byte {
+	return common.JoinBytes(executorBondPrefix, uint32ToBytesBE(domainId), executor.Bytes())
 }
 
 type ExecutorBond struct {
@@ -976,7 +1016,6 @@ type ExecutorBond struct {
 func (b *ExecutorBond) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
 		executorBondVariableName,
-		b.Executor,
 		b.ZnnAmount,
 		b.QsrAmount,
 		b.Status,
@@ -984,24 +1023,47 @@ func (b *ExecutorBond) Save(context db.DB) error {
 	if err != nil {
 		return err
 	}
-	return context.Put(getExecutorBondKey(b.DomainId), data)
+	return context.Put(getExecutorBondKey(b.DomainId, b.Executor), data)
 }
 func (b *ExecutorBond) Delete(context db.DB) error {
-	return context.Delete(getExecutorBondKey(b.DomainId))
+	return context.Delete(getExecutorBondKey(b.DomainId, b.Executor))
 }
-func GetExecutorBond(context db.DB, domainId uint32) (*ExecutorBond, error) {
-	key := getExecutorBondKey(domainId)
+
+func isExecutorBondKey(key []byte) bool {
+	return len(key) == 1+4+types.AddressSize && key[0] == executorBondPrefix[0]
+}
+func unmarshalExecutorBondKey(key []byte) (uint32, types.Address, error) {
+	if !isExecutorBondKey(key) {
+		return 0, types.Address{}, errors.Errorf("invalid key! Not executor bond key")
+	}
+	executor, err := types.BytesToAddress(key[5:])
+	if err != nil {
+		return 0, types.Address{}, err
+	}
+	return bytesBEToUint32(key[1:5]), executor, nil
+}
+func parseExecutorBond(key, data []byte) (*ExecutorBond, error) {
+	if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	}
+	bond := new(ExecutorBond)
+	if err := ABISettlement.UnpackVariable(bond, executorBondVariableName, data); err != nil {
+		return nil, err
+	}
+	domainId, executor, err := unmarshalExecutorBondKey(key)
+	if err != nil {
+		return nil, err
+	}
+	bond.DomainId = domainId
+	bond.Executor = executor
+	return bond, nil
+}
+func GetExecutorBond(context db.DB, domainId uint32, executor types.Address) (*ExecutorBond, error) {
+	key := getExecutorBondKey(domainId, executor)
 	if data, err := context.Get(key); err != nil {
 		return nil, err
-	} else if len(data) == 0 {
-		return nil, constants.ErrDataNonExistent
 	} else {
-		bond := new(ExecutorBond)
-		if err := ABISettlement.UnpackVariable(bond, executorBondVariableName, data); err != nil {
-			return nil, err
-		}
-		bond.DomainId = domainId
-		return bond, nil
+		return parseExecutorBond(key, data)
 	}
 }
 
@@ -1010,20 +1072,18 @@ func GetExecutorBond(context db.DB, domainId uint32) (*ExecutorBond, error) {
 // ============================================================================
 
 type PeripheryConfig struct {
-	Administrator           types.Address
-	EmergencyPauseAuthority types.Address
-	WithdrawalDelay         uint64
-	MaxBatchWithdrawal      *big.Int
-	Reserved                []byte
+	WithdrawalDelay     uint64
+	MaxBatchWithdrawal  *big.Int
+	RuntimeUpgradeDelay uint64
+	Reserved            []byte
 }
 
 func (p *PeripheryConfig) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
 		peripheryConfigVariableName,
-		p.Administrator,
-		p.EmergencyPauseAuthority,
 		p.WithdrawalDelay,
 		p.MaxBatchWithdrawal,
+		p.RuntimeUpgradeDelay,
 		p.Reserved,
 	)
 	if err != nil {
@@ -1042,6 +1102,139 @@ func GetPeripheryConfig(context db.DB) (*PeripheryConfig, error) {
 			return nil, err
 		}
 		return config, nil
+	}
+}
+
+// ============================================================================
+// Pause state (global singleton + per-domain)
+// ============================================================================
+
+type PauseState struct {
+	SubmitPaused bool
+	RelayPaused  bool
+}
+
+func (p *PauseState) SaveGlobal(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		pauseStateVariableName,
+		p.SubmitPaused,
+		p.RelayPaused,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(globalPauseStateKey, data)
+}
+func GetGlobalPauseState(context db.DB) (*PauseState, error) {
+	if data, err := context.Get(globalPauseStateKey); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &PauseState{}, nil
+	} else {
+		state := new(PauseState)
+		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, data); err != nil {
+			return nil, err
+		}
+		return state, nil
+	}
+}
+
+func getDomainPauseStateKey(domainId uint32) []byte {
+	return common.JoinBytes(domainPauseStatePrefix, uint32ToBytesBE(domainId))
+}
+func (p *PauseState) SaveDomain(context db.DB, domainId uint32) error {
+	data, err := ABISettlement.PackVariable(
+		pauseStateVariableName,
+		p.SubmitPaused,
+		p.RelayPaused,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getDomainPauseStateKey(domainId), data)
+}
+func GetDomainPauseState(context db.DB, domainId uint32) (*PauseState, error) {
+	key := getDomainPauseStateKey(domainId)
+	if data, err := context.Get(key); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &PauseState{}, nil
+	} else {
+		state := new(PauseState)
+		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, data); err != nil {
+			return nil, err
+		}
+		return state, nil
+	}
+}
+
+// IsSubmitPaused reports whether SUBMIT is paused globally or for domainId.
+func IsSubmitPaused(context db.DB, domainId uint32) (bool, error) {
+	global, err := GetGlobalPauseState(context)
+	if err != nil {
+		return false, err
+	}
+	if global.SubmitPaused {
+		return true, nil
+	}
+	domain, err := GetDomainPauseState(context, domainId)
+	if err != nil {
+		return false, err
+	}
+	return domain.SubmitPaused, nil
+}
+
+// IsRelayPaused reports whether RELAY is paused globally or for domainId.
+func IsRelayPaused(context db.DB, domainId uint32) (bool, error) {
+	global, err := GetGlobalPauseState(context)
+	if err != nil {
+		return false, err
+	}
+	if global.RelayPaused {
+		return true, nil
+	}
+	domain, err := GetDomainPauseState(context, domainId)
+	if err != nil {
+		return false, err
+	}
+	return domain.RelayPaused, nil
+}
+
+// ============================================================================
+// Escape-hatch record (per domain, stub)
+// ============================================================================
+
+type EscapeHatchRecord struct {
+	DomainId          uint32
+	TriggeredAtHeight uint64
+}
+
+func getEscapeHatchKey(domainId uint32) []byte {
+	return common.JoinBytes(escapeHatchPrefix, uint32ToBytesBE(domainId))
+}
+func (r *EscapeHatchRecord) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		escapeHatchRecordVariableName,
+		r.TriggeredAtHeight,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getEscapeHatchKey(r.DomainId), data)
+}
+func GetEscapeHatchRecord(context db.DB, domainId uint32) (*EscapeHatchRecord, error) {
+	key := getEscapeHatchKey(domainId)
+	if data, err := context.Get(key); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	} else {
+		record := new(EscapeHatchRecord)
+		if err := ABISettlement.UnpackVariable(record, escapeHatchRecordVariableName, data); err != nil {
+			return nil, err
+		}
+		record.DomainId = domainId
+		return record, nil
 	}
 }
 
