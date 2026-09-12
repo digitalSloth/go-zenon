@@ -172,6 +172,7 @@ jobs:
           file: build/*
           release_name: ${{ needs.version.outputs.release_name }}
           tag: ${{ needs.version.outputs.release_tag }}
+          target_commit: ${{ github.sha }}
           file_glob: true
           overwrite: true
           prerelease: ${{ needs.version.outputs.prerelease }}
@@ -229,6 +230,7 @@ jobs:
           file: universal/*
           release_name: ${{ needs.version.outputs.release_name }}
           tag: ${{ needs.version.outputs.release_tag }}
+          target_commit: ${{ github.sha }}
           overwrite: true
           file_glob: true
           prerelease: ${{ needs.version.outputs.prerelease }}
