@@ -26,6 +26,7 @@ const (
 	MaxOutboxPayloadSize     = 1024 * 8 // 8 KiB
 	MaxAssetsPerBatch        = 16
 	MaxWithdrawalsPerUpdate  = 16
+	FeeBurnShare             = 30 // percent of each settled fee burned
 )
 
 // Hard-bound holders for pre-mainnet parameters. Concrete ceilings are
@@ -59,6 +60,14 @@ var (
 	MaxBatchMintFloor = big.NewInt(1)
 	// pre-mainnet; finalize before mainnet
 	MaxBatchMintCeiling = new(big.Int).Set(MaxBatchWithdrawalCeiling)
+
+	// Developer-fee price bounds, in ZNN base units per byte.
+	ZnnPerByteOfBytecodeFloor = big.NewInt(1)
+	// pre-mainnet; finalize before mainnet
+	ZnnPerByteOfBytecodeCeiling = big.NewInt(Decimals)
+	ZnnPerByteOfStateFloor      = big.NewInt(1)
+	// pre-mainnet; finalize before mainnet
+	ZnnPerByteOfStateCeiling = big.NewInt(Decimals)
 )
 
 // IsWithdrawalDelayInBounds reports whether a withdrawal-delay/challenge-window
@@ -103,4 +112,22 @@ func IsInputGasInBounds(plasmaLimit uint64) bool {
 // against the delay being set, not the one it replaces.
 func IsValueCapWindowValid(window, activeWithdrawalDelay uint64) bool {
 	return window >= activeWithdrawalDelay
+}
+
+// IsZnnPerByteOfBytecodeInBounds reports whether a bytecode fee price is
+// within the enforced hard bounds.
+func IsZnnPerByteOfBytecodeInBounds(v *big.Int) bool {
+	if v == nil {
+		return false
+	}
+	return v.Cmp(ZnnPerByteOfBytecodeFloor) >= 0 && v.Cmp(ZnnPerByteOfBytecodeCeiling) <= 0
+}
+
+// IsZnnPerByteOfStateInBounds reports whether a state fee price is within
+// the enforced hard bounds.
+func IsZnnPerByteOfStateInBounds(v *big.Int) bool {
+	if v == nil {
+		return false
+	}
+	return v.Cmp(ZnnPerByteOfStateFloor) >= 0 && v.Cmp(ZnnPerByteOfStateCeiling) <= 0
 }

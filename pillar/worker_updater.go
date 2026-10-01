@@ -33,6 +33,15 @@ func (w *worker) updateContracts(momentumStore store.Momentum) error {
 		}
 	}
 	for _, address := range types.EmbeddedWUpdate {
+		if address == types.SettlementContract {
+			active, err := momentumStore.IsSporkActive(types.OffchainExecutionSpork)
+			if err != nil {
+				return err
+			}
+			if !active {
+				continue
+			}
+		}
 		if err := canPerformEmbeddedUpdate(momentumStore, w.chain, address); err == nil {
 			if pricing != nil && w.unconfirmedUpdate(address) != nil {
 				continue
