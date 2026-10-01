@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"bytes"
+	"math"
 	"math/big"
 	"testing"
 
@@ -61,17 +63,180 @@ func TestSettlement_RejectedBeforeSpork(t *testing.T) {
 	z.InsertNewMomentum()
 }
 
-func setPeripheryConfigStep(admin types.Address, withdrawalDelay uint64, maxBatchWithdrawal *big.Int, runtimeUpgradeDelay uint64) *nom.AccountBlock {
+// domainParams mirrors the RegisterDomain inputs.
+type domainParams struct {
+	DomainId            uint32
+	DomainClass         uint8
+	RuntimeKind         uint8
+	StfSpecHash         types.Hash
+	InputSource         uint8
+	ExecProfile         uint8
+	ForeignProfile      uint8
+	ProfileConfig       []byte
+	ChainBinding        []byte
+	MinExecutors        uint8
+	ProposerPolicy      uint8
+	ValueCaps           []byte
+	FinalityModel       uint8
+	Status              uint8
+	WithdrawalDelay     uint64
+	RuntimeUpgradeDelay uint64
+}
+
+// phase1Domain returns the only profile Phase 1 accepts: active, no caps,
+// both delays at the withdrawal-delay floor.
+func phase1Domain(domainId uint32) domainParams {
+	return domainParams{
+		DomainId:            domainId,
+		DomainClass:         definition.DomainClassExecution,
+		RuntimeKind:         definition.RuntimeKindWASM,
+		InputSource:         definition.InputSourceL1Native,
+		ExecProfile:         definition.ExecProfileAttestation,
+		ForeignProfile:      definition.ForeignProfileNone,
+		ProfileConfig:       []byte{},
+		ChainBinding:        []byte{},
+		MinExecutors:        1,
+		ProposerPolicy:      definition.ProposerPolicySingle,
+		ValueCaps:           []byte{},
+		FinalityModel:       definition.FinalityModelDelay,
+		Status:              definition.DomainStatusActive,
+		WithdrawalDelay:     constants.WithdrawalDelayMin,
+		RuntimeUpgradeDelay: constants.WithdrawalDelayMin,
+	}
+}
+
+// valueCapsWithWindow builds a valueCaps blob: an 8-byte big-endian window
+// followed by a tag byte that distinguishes blobs with the same window.
+func valueCapsWithWindow(window uint64, tag byte) []byte {
+	return append(common.Uint64ToBytes(window), tag)
+}
+
+// assetIdFor builds the canonical asset id: 22 zero bytes then the ZTS.
+func assetIdFor(zts types.ZenonTokenStandard) types.Hash {
+	var id types.Hash
+	copy(id[22:], zts.Bytes())
+	return id
+}
+
+func settlementStep(from types.Address, method string, args ...interface{}) *nom.AccountBlock {
 	return &nom.AccountBlock{
-		Address:       admin,
+		Address:       from,
 		ToAddress:     types.SettlementContract,
 		TokenStandard: types.ZnnTokenStandard,
 		Amount:        big.NewInt(0),
-		Data: definition.ABISettlement.PackMethodPanic(definition.SettlementSetPeripheryConfigMethodName,
-			withdrawalDelay,
-			maxBatchWithdrawal,
-			runtimeUpgradeDelay,
-		),
+		Data:          definition.ABISettlement.PackMethodPanic(method, args...),
+	}
+}
+
+func registerDomainStep(admin types.Address, p domainParams) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementRegisterDomainMethodName,
+		p.DomainId,
+		p.DomainClass,
+		p.RuntimeKind,
+		p.StfSpecHash,
+		p.InputSource,
+		p.ExecProfile,
+		p.ForeignProfile,
+		p.ProfileConfig,
+		p.ChainBinding,
+		p.MinExecutors,
+		p.ProposerPolicy,
+		p.ValueCaps,
+		p.FinalityModel,
+		p.Status,
+		p.WithdrawalDelay,
+		p.RuntimeUpgradeDelay,
+	)
+}
+
+func setDomainConfigStep(admin types.Address, domainId uint32, withdrawalDelay, runtimeUpgradeDelay uint64) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementSetDomainConfigMethodName, domainId, withdrawalDelay, runtimeUpgradeDelay)
+}
+
+func setAssetConfigStep(admin types.Address, domainId uint32, assetId types.Hash, maxBatchWithdrawal *big.Int) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementSetAssetConfigMethodName, domainId, assetId, maxBatchWithdrawal)
+}
+
+func setApprovedDAModesStep(admin types.Address, domainId uint32, modes []byte) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementSetApprovedDAModesMethodName, domainId, modes)
+}
+
+// newSettlementZenon starts a mock chain with the offchain-execution spork
+// active and g.User5 as network admin.
+func newSettlementZenon(t *testing.T) mock.MockZenon {
+	z := mock.NewMockZenon(t)
+	t.Cleanup(z.StopPanic)
+	activateOffchainExecution(t, z)
+	logs := z.SaveLogs(common.EmbeddedLogger)
+	t.Cleanup(func() { logs.Equals(t, ``) })
+	saveBridgeConstants(t)
+
+	savedAdmin := types.NetworkAdmin
+	types.NetworkAdmin = g.User5.Address
+	t.Cleanup(func() { types.NetworkAdmin = savedAdmin })
+	return z
+}
+
+// settlementCall executes the block against the contract and checks the
+// receive error.
+func settlementCall(t *testing.T, z mock.MockZenon, block *nom.AccountBlock, want error) {
+	t.Helper()
+	call := z.CallContract(block)
+	z.InsertNewMomentum()
+	z.InsertNewMomentum()
+	call.Error(t, want)
+}
+
+// settlementRejectedAtSend checks that send validation rejects the block.
+func settlementRejectedAtSend(z mock.MockZenon, block *nom.AccountBlock) {
+	z.InsertSendBlock(block, constants.ErrForbiddenParam, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+}
+
+func settlementStorage(t *testing.T, z mock.MockZenon) db.DB {
+	t.Helper()
+	_, context, err := api.GetFrontierContext(z.Chain(), types.SettlementContract)
+	common.FailIfErr(t, err)
+	return context.Storage()
+}
+
+func advanceMomentums(t *testing.T, z mock.MockZenon, n uint64) {
+	t.Helper()
+	frMom, err := z.Chain().GetFrontierMomentumStore().GetFrontierMomentum()
+	common.FailIfErr(t, err)
+	z.InsertMomentumsTo(frMom.Height + n)
+}
+
+// challengeHash returns the pending params hash of a time-challenge scope,
+// or the zero hash when none is pending.
+func challengeHash(t *testing.T, z mock.MockZenon, scope string) types.Hash {
+	t.Helper()
+	info, err := definition.GetTimeChallengeInfoVariable(settlementStorage(t, z), scope)
+	common.FailIfErr(t, err)
+	if info == nil {
+		return types.ZeroHash
+	}
+	return info.ParamsHash
+}
+
+func domainRecordOf(t *testing.T, z mock.MockZenon, domainId uint32) *definition.DomainRecord {
+	t.Helper()
+	record, err := definition.GetDomainRecord(settlementStorage(t, z), domainId)
+	common.FailIfErr(t, err)
+	return record
+}
+
+func domainConfigOf(t *testing.T, z mock.MockZenon, domainId uint32) *definition.DomainConfig {
+	t.Helper()
+	config, err := definition.GetDomainConfig(settlementStorage(t, z), domainId)
+	common.FailIfErr(t, err)
+	return config
+}
+
+func registerDomains(t *testing.T, z mock.MockZenon, ids ...uint32) {
+	t.Helper()
+	for _, id := range ids {
+		settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(id)), nil)
 	}
 }
 
@@ -108,12 +273,12 @@ func TestSettlement_AdminGate_RejectsNonNetworkAdmin(t *testing.T) {
 	activateOffchainExecution(t, z)
 	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
 
-	call := z.CallContract(setPeripheryConfigStep(g.User1.Address, constants.WithdrawalDelayMin, big.NewInt(1000), constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, constants.ErrPermissionDenied)
+	settlementCall(t, z, registerDomainStep(g.User1.Address, phase1Domain(1)), constants.ErrPermissionDenied)
+	settlementCall(t, z, setDomainConfigStep(g.User1.Address, 1, constants.WithdrawalDelayMin, constants.WithdrawalDelayMin), constants.ErrPermissionDenied)
+	settlementCall(t, z, setAssetConfigStep(g.User1.Address, 1, assetIdFor(types.ZnnTokenStandard), big.NewInt(1000)), constants.ErrPermissionDenied)
+	settlementCall(t, z, setApprovedDAModesStep(g.User1.Address, 1, []byte{definition.DAModeBestEffort}), constants.ErrPermissionDenied)
 
-	call = z.CallContract(pauseStep(g.User1.Address, 0, true, definition.PauseScopeSubmit, true))
+	call := z.CallContract(pauseStep(g.User1.Address, 0, true, definition.PauseScopeSubmit, true))
 	z.InsertNewMomentum()
 	z.InsertNewMomentum()
 	call.Error(t, constants.ErrPermissionDenied)
@@ -124,140 +289,371 @@ func TestSettlement_AdminGate_RejectsNonNetworkAdmin(t *testing.T) {
 	call.Error(t, constants.ErrPermissionDenied)
 }
 
-func TestSettlement_SetPeripheryConfig_MaxBatchWithdrawalCeiling(t *testing.T) {
-	z := mock.NewMockZenon(t)
-	defer z.StopPanic()
-	activateOffchainExecution(t, z)
-	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
-	saveBridgeConstants(t)
-	constants.MinSoftDelay = 10
+func TestSettlement_RegisterDomain_Phase1Profile(t *testing.T) {
+	z := newSettlementZenon(t)
 
-	savedAdmin := types.NetworkAdmin
-	types.NetworkAdmin = g.User5.Address
-	defer func() { types.NetworkAdmin = savedAdmin }()
+	settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(1)), nil)
+
+	record := domainRecordOf(t, z, 1)
+	if record.DomainClass != definition.DomainClassExecution || record.RuntimeKind != definition.RuntimeKindWASM ||
+		record.StfSpecHash != types.ZeroHash || record.InputSource != definition.InputSourceL1Native ||
+		record.ExecProfile != definition.ExecProfileAttestation || record.ForeignProfile != definition.ForeignProfileNone ||
+		len(record.ProfileConfig) != 0 || len(record.ChainBinding) != 0 || record.MinExecutors != 1 ||
+		record.ProposerPolicy != definition.ProposerPolicySingle || len(record.ValueCaps) != 0 ||
+		record.FinalityModel != definition.FinalityModelDelay || record.Status != definition.DomainStatusActive {
+		t.Fatalf("unexpected domain record: %+v", record)
+	}
+	config := domainConfigOf(t, z, 1)
+	if config.WithdrawalDelay != constants.WithdrawalDelayMin || config.RuntimeUpgradeDelay != constants.WithdrawalDelayMin {
+		t.Fatalf("unexpected domain config: %+v", config)
+	}
+	if last, err := definition.GetLastDomainId(settlementStorage(t, z)); err != nil || last != 1 {
+		t.Fatalf("expected last domain id 1, got %d err %v", last, err)
+	}
+
+	settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(2)), nil)
+	if last, err := definition.GetLastDomainId(settlementStorage(t, z)); err != nil || last != 2 {
+		t.Fatalf("expected last domain id 2, got %d err %v", last, err)
+	}
+}
+
+func TestSettlement_RegisterDomain_RejectsReservedValues(t *testing.T) {
+	z := newSettlementZenon(t)
+	d := constants.WithdrawalDelayMin
+
+	cases := []struct {
+		name   string
+		mutate func(*domainParams)
+	}{
+		{"domainId 0", func(p *domainParams) { p.DomainId = 0 }},
+		{"inputSource relayed", func(p *domainParams) { p.InputSource = 1 }},
+		{"inputSource retired", func(p *domainParams) { p.InputSource = 2 }},
+		{"proposerPolicy 1", func(p *domainParams) { p.ProposerPolicy = 1 }},
+		{"proposerPolicy 2", func(p *domainParams) { p.ProposerPolicy = 2 }},
+		{"domainClass 1", func(p *domainParams) { p.DomainClass = 1 }},
+		{"domainClass 2", func(p *domainParams) { p.DomainClass = 2 }},
+		{"execProfile 1", func(p *domainParams) { p.ExecProfile = 1 }},
+		{"execProfile 2", func(p *domainParams) { p.ExecProfile = 2 }},
+		{"foreignProfile 1", func(p *domainParams) { p.ForeignProfile = 1 }},
+		{"foreignProfile 2", func(p *domainParams) { p.ForeignProfile = 2 }},
+		{"foreignProfile 3", func(p *domainParams) { p.ForeignProfile = 3 }},
+		{"runtimeKind 1", func(p *domainParams) { p.RuntimeKind = 1 }},
+		{"finalityModel 1", func(p *domainParams) { p.FinalityModel = 1 }},
+		{"finalityModel 2", func(p *domainParams) { p.FinalityModel = 2 }},
+		{"minExecutors 0", func(p *domainParams) { p.MinExecutors = 0 }},
+		{"minExecutors 2", func(p *domainParams) { p.MinExecutors = 2 }},
+		{"status 2", func(p *domainParams) { p.Status = 2 }},
+		{"chainBinding set", func(p *domainParams) { p.ChainBinding = []byte{1} }},
+		{"profileConfig set", func(p *domainParams) { p.ProfileConfig = []byte{1} }},
+		{"valueCaps 1 byte", func(p *domainParams) { p.ValueCaps = []byte{1} }},
+		{"valueCaps 7 bytes", func(p *domainParams) { p.ValueCaps = make([]byte, 7) }},
+		{"window below withdrawalDelay", func(p *domainParams) {
+			p.WithdrawalDelay, p.RuntimeUpgradeDelay = d+5, d+5
+			p.ValueCaps = valueCapsWithWindow(d, 0)
+		}},
+		{"withdrawalDelay below min", func(p *domainParams) { p.WithdrawalDelay = d - 1 }},
+		{"withdrawalDelay above max", func(p *domainParams) {
+			p.WithdrawalDelay = constants.WithdrawalDelayMax + 1
+			p.RuntimeUpgradeDelay = constants.WithdrawalDelayMax + 1
+		}},
+		{"runtimeUpgradeDelay above max", func(p *domainParams) {
+			p.RuntimeUpgradeDelay = math.MaxUint64
+		}},
+		{"runtimeUpgradeDelay below withdrawalDelay", func(p *domainParams) {
+			p.WithdrawalDelay, p.RuntimeUpgradeDelay = d+1, d
+		}},
+	}
+	for _, c := range cases {
+		p := phase1Domain(1)
+		c.mutate(&p)
+		settlementRejectedAtSend(z, registerDomainStep(g.User5.Address, p))
+	}
+}
+
+func TestSettlement_RegisterDomain_RejectsSkippedIdChangedDelaysAndNoOp(t *testing.T) {
+	z := newSettlementZenon(t)
+	d := constants.WithdrawalDelayMin
+
+	settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(2)), constants.ErrForbiddenParam)
+	if last, err := definition.GetLastDomainId(settlementStorage(t, z)); err != nil || last != 0 {
+		t.Fatalf("expected last domain id 0, got %d err %v", last, err)
+	}
+
+	registerDomains(t, z, 1)
+
+	changed := phase1Domain(1)
+	changed.WithdrawalDelay, changed.RuntimeUpgradeDelay = d+1, d+1
+	settlementCall(t, z, registerDomainStep(g.User5.Address, changed), constants.ErrForbiddenParam)
+
+	settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(1)), constants.ErrForbiddenParam)
+
+	if h := challengeHash(t, z, "RegisterDomain/1"); !h.IsZero() {
+		t.Fatalf("expected no pending challenge, got %v", h)
+	}
+}
+
+func TestSettlement_RegisterDomain_ValueCapsChangeIsTimeChallenged(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinAdministratorDelay = 20
+	d := constants.WithdrawalDelayMin
+	scope := "RegisterDomain/1"
+
+	oldCaps := valueCapsWithWindow(d, 1)
+	newCaps := valueCapsWithWindow(d, 2)
+	p := phase1Domain(1)
+	p.ValueCaps = oldCaps
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+
+	// 1. new caps with PAUSED: status applies at once, caps stay pending
+	p.ValueCaps, p.Status = newCaps, definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	record := domainRecordOf(t, z, 1)
+	if record.Status != definition.DomainStatusPaused || !bytes.Equal(record.ValueCaps, oldCaps) {
+		t.Fatalf("expected PAUSED with old caps, got %+v", record)
+	}
+	h := challengeHash(t, z, scope)
+	if h.IsZero() {
+		t.Fatal("expected a pending challenge")
+	}
+
+	// 2. status-only flip keeps the pending challenge
+	p.ValueCaps, p.Status = oldCaps, definition.DomainStatusActive
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusActive {
+		t.Fatalf("expected ACTIVE, got %+v", record)
+	}
+	if got := challengeHash(t, z, scope); got != h {
+		t.Fatalf("expected challenge hash %v to be kept, got %v", h, got)
+	}
+
+	// 3. premature completion fails and rolls its status back
+	p.ValueCaps, p.Status = newCaps, definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrTimeChallengeNotDue)
+	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusActive {
+		t.Fatalf("expected ACTIVE after rolled-back call, got %+v", record)
+	}
+
+	// 4. completion applies the caps and its own status
+	advanceMomentums(t, z, constants.MinAdministratorDelay)
+	p.ValueCaps, p.Status = newCaps, definition.DomainStatusActive
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	record = domainRecordOf(t, z, 1)
+	if record.Status != definition.DomainStatusActive || !bytes.Equal(record.ValueCaps, newCaps) {
+		t.Fatalf("expected ACTIVE with new caps, got %+v", record)
+	}
+}
+
+func TestSettlement_RegisterDomain_StfSpecHashBumpUsesRuntimeUpgradeDelay(t *testing.T) {
+	z := newSettlementZenon(t)
+	savedMin := constants.WithdrawalDelayMin
+	constants.WithdrawalDelayMin = 10
+	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
+
+	p := phase1Domain(1)
+	p.RuntimeUpgradeDelay = 40
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+
+	bumped := hashFromByteForTest(7)
+	p.StfSpecHash = bumped
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	if h := domainRecordOf(t, z, 1).StfSpecHash; h != types.ZeroHash {
+		t.Fatalf("expected old hash while pending, got %v", h)
+	}
+
+	advanceMomentums(t, z, 20)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrTimeChallengeNotDue)
+
+	advanceMomentums(t, z, 40)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	if h := domainRecordOf(t, z, 1).StfSpecHash; h != bumped {
+		t.Fatalf("expected bumped hash, got %v", h)
+	}
+}
+
+func hashFromByteForTest(b byte) types.Hash {
+	var h types.Hash
+	for i := range h {
+		h[i] = b
+	}
+	return h
+}
+
+func TestSettlement_SetDomainConfig_Bounds(t *testing.T) {
+	z := newSettlementZenon(t)
+	d := constants.WithdrawalDelayMin
+
+	settlementRejectedAtSend(z, setDomainConfigStep(g.User5.Address, 1, d-1, constants.WithdrawalDelayMax))
+	settlementRejectedAtSend(z, setDomainConfigStep(g.User5.Address, 1, constants.WithdrawalDelayMax+1, constants.WithdrawalDelayMax+1))
+	settlementRejectedAtSend(z, setDomainConfigStep(g.User5.Address, 1, d+100, d+99))
+	settlementRejectedAtSend(z, setDomainConfigStep(g.User5.Address, 1, d, math.MaxUint64))
+
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, d, d), constants.ErrForbiddenParam)
+}
+
+func TestSettlement_SetDomainConfig_TimeChallenge(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	d := constants.WithdrawalDelayMin
+	registerDomains(t, z, 1)
+
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, d+5, d+6), nil)
+	if got := domainConfigOf(t, z, 1); got.WithdrawalDelay != d || got.RuntimeUpgradeDelay != d {
+		t.Fatalf("expected unchanged config while pending, got %+v", got)
+	}
+
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, d+5, d+6), constants.ErrTimeChallengeNotDue)
+
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, d+5, d+6), nil)
+	if got := domainConfigOf(t, z, 1); got.WithdrawalDelay != d+5 || got.RuntimeUpgradeDelay != d+6 {
+		t.Fatalf("expected new config, got %+v", got)
+	}
+
+	// later reconfigurations must carry the new delays
+	p := phase1Domain(1)
+	p.Status = definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrForbiddenParam)
+	p.WithdrawalDelay, p.RuntimeUpgradeDelay = d+5, d+6
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusPaused {
+		t.Fatalf("expected PAUSED, got %+v", record)
+	}
+}
+
+func TestSettlement_SetDomainConfig_RejectsDelayAboveValueCapWindow(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 30
+	constants.MinAdministratorDelay = 10
+	d := constants.WithdrawalDelayMin
+	window := d + 10
+
+	p1 := phase1Domain(1)
+	p1.ValueCaps = valueCapsWithWindow(window, 1)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p1), nil)
+	p2 := phase1Domain(2)
+	p2.ValueCaps = valueCapsWithWindow(window, 1)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
+
+	// a delay above the window is rejected; a delay equal to it is accepted
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window+1, window+1), constants.ErrForbiddenParam)
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window, window), nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window, window), nil)
+	if got := domainConfigOf(t, z, 1); got.WithdrawalDelay != window {
+		t.Fatalf("expected delay %d, got %+v", window, got)
+	}
+
+	// domain 2: a pending delay is invalidated by a later window shrink
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 2, d+5, d+5), nil)
+	p2.ValueCaps = valueCapsWithWindow(d, 2)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
+	advanceMomentums(t, z, constants.MinAdministratorDelay)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
+	if record := domainRecordOf(t, z, 2); !bytes.Equal(record.ValueCaps, p2.ValueCaps) {
+		t.Fatalf("expected shrunk window to be stored, got %+v", record)
+	}
+
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 2, d+5, d+5), constants.ErrForbiddenParam)
+	if got := domainConfigOf(t, z, 2); got.WithdrawalDelay != d {
+		t.Fatalf("expected stored delays unchanged, got %+v", got)
+	}
+}
+
+func TestSettlement_SetAssetConfig_NeverFalls(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1, 2)
+	assetA := assetIdFor(types.ZnnTokenStandard)
+	assetB := assetIdFor(types.QsrTokenStandard)
+
+	maxOf := func(domainId uint32, assetId types.Hash) *big.Int {
+		config, err := definition.GetAssetConfig(settlementStorage(t, z), domainId, assetId)
+		common.FailIfErr(t, err)
+		return config.MaxBatchWithdrawal
+	}
+	set := func(domainId uint32, assetId types.Hash, v int64, want error) {
+		settlementCall(t, z, setAssetConfigStep(g.User5.Address, domainId, assetId, big.NewInt(v)), want)
+	}
+	setAndComplete := func(domainId uint32, assetId types.Hash, v int64) {
+		set(domainId, assetId, v, nil)
+		advanceMomentums(t, z, constants.MinSoftDelay)
+		set(domainId, assetId, v, nil)
+	}
+
+	var nonCanonical types.Hash
+	nonCanonical[0] = 0x01
+	copy(nonCanonical[22:], types.ZnnTokenStandard.Bytes())
+	settlementRejectedAtSend(z, setAssetConfigStep(g.User5.Address, 1, nonCanonical, big.NewInt(1000)))
 
 	overCeiling := new(big.Int).Add(constants.MaxBatchWithdrawalCeiling, big.NewInt(1))
-	z.InsertSendBlock(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, overCeiling, constants.WithdrawalDelayMin),
-		constants.ErrForbiddenParam, mock.SkipVmChanges)
-	z.InsertNewMomentum()
+	settlementRejectedAtSend(z, setAssetConfigStep(g.User5.Address, 1, assetA, overCeiling))
+	settlementRejectedAtSend(z, setAssetConfigStep(g.User5.Address, 1, assetA, big.NewInt(0)))
 
-	withinCeiling := big.NewInt(12345)
-	call := z.CallContract(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, withinCeiling, constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, nil)
-
-	// config unchanged until the challenge elapses
-	_, context, err := api.GetFrontierContext(z.Chain(), types.SettlementContract)
-	common.FailIfErr(t, err)
-	if _, err := definition.GetPeripheryConfig(context.Storage()); err != constants.ErrDataNonExistent {
-		t.Fatalf("expected periphery config unset before challenge completes, got err %v", err)
+	setAndComplete(1, assetA, 1000)
+	if maxOf(1, assetA).Cmp(big.NewInt(1000)) != 0 {
+		t.Fatalf("expected 1000, got %v", maxOf(1, assetA))
 	}
 
-	frMom, err := z.Chain().GetFrontierMomentumStore().GetFrontierMomentum()
-	common.FailIfErr(t, err)
-	z.InsertMomentumsTo(frMom.Height + constants.MinSoftDelay)
+	set(1, assetA, 999, constants.ErrForbiddenParam)
 
-	call = z.CallContract(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, withinCeiling, constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, nil)
+	paused := phase1Domain(1)
+	paused.Status = definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, paused), nil)
+	if domainRecordOf(t, z, 1).Status != definition.DomainStatusPaused {
+		t.Fatal("expected domain 1 PAUSED")
+	}
+	set(1, assetA, 999, constants.ErrForbiddenParam)
 
-	_, context, err = api.GetFrontierContext(z.Chain(), types.SettlementContract)
-	common.FailIfErr(t, err)
-	config, err := definition.GetPeripheryConfig(context.Storage())
-	common.FailIfErr(t, err)
-	if config.MaxBatchWithdrawal.Cmp(withinCeiling) != 0 {
-		t.Fatalf("expected maxBatchWithdrawal %v, got %v", withinCeiling, config.MaxBatchWithdrawal)
+	setAndComplete(1, assetA, 2000)
+	if maxOf(1, assetA).Cmp(big.NewInt(2000)) != 0 {
+		t.Fatalf("expected 2000, got %v", maxOf(1, assetA))
+	}
+
+	// a fresh asset and a fresh domain accept a lower value
+	setAndComplete(1, assetB, 5)
+	setAndComplete(2, assetA, 5)
+	if maxOf(1, assetB).Cmp(big.NewInt(5)) != 0 || maxOf(2, assetA).Cmp(big.NewInt(5)) != 0 {
+		t.Fatal("expected independent asset configs")
+	}
+
+	// different scopes run independently
+	set(1, assetA, 3000, nil)
+	set(1, assetB, 6, nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	set(1, assetA, 3000, nil)
+	set(1, assetB, 6, nil)
+	if maxOf(1, assetA).Cmp(big.NewInt(3000)) != 0 || maxOf(1, assetB).Cmp(big.NewInt(6)) != 0 {
+		t.Fatalf("expected both pending changes to complete, got %v and %v", maxOf(1, assetA), maxOf(1, assetB))
 	}
 }
 
-func TestSettlement_SetPeripheryConfig_RuntimeUpgradeDelayFloor(t *testing.T) {
-	z := mock.NewMockZenon(t)
-	defer z.StopPanic()
-	activateOffchainExecution(t, z)
-	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
-
-	savedAdmin := types.NetworkAdmin
-	types.NetworkAdmin = g.User5.Address
-	defer func() { types.NetworkAdmin = savedAdmin }()
-
-	withdrawalDelay := constants.WithdrawalDelayMin + 100
-	z.InsertSendBlock(setPeripheryConfigStep(g.User5.Address, withdrawalDelay, big.NewInt(1000), withdrawalDelay-1),
-		constants.ErrForbiddenParam, mock.SkipVmChanges)
-	z.InsertNewMomentum()
-}
-
-func TestSettlement_SetPeripheryConfig_WithdrawalDelayBounds(t *testing.T) {
-	z := mock.NewMockZenon(t)
-	defer z.StopPanic()
-	activateOffchainExecution(t, z)
-	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
-
-	savedAdmin := types.NetworkAdmin
-	types.NetworkAdmin = g.User5.Address
-	defer func() { types.NetworkAdmin = savedAdmin }()
-
-	belowMin := constants.WithdrawalDelayMin - 1
-	z.InsertSendBlock(setPeripheryConfigStep(g.User5.Address, belowMin, big.NewInt(1000), constants.WithdrawalDelayMax),
-		constants.ErrForbiddenParam, mock.SkipVmChanges)
-	z.InsertNewMomentum()
-
-	aboveMax := constants.WithdrawalDelayMax + 1
-	z.InsertSendBlock(setPeripheryConfigStep(g.User5.Address, aboveMax, big.NewInt(1000), aboveMax),
-		constants.ErrForbiddenParam, mock.SkipVmChanges)
-	z.InsertNewMomentum()
-}
-
-func TestSettlement_SetPeripheryConfig_TimeChallengeNotDue(t *testing.T) {
-	z := mock.NewMockZenon(t)
-	defer z.StopPanic()
-	activateOffchainExecution(t, z)
-	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
-	saveBridgeConstants(t)
+func TestSettlement_SetApprovedDAModes(t *testing.T) {
+	z := newSettlementZenon(t)
 	constants.MinSoftDelay = 10
 
-	savedAdmin := types.NetworkAdmin
-	types.NetworkAdmin = g.User5.Address
-	defer func() { types.NetworkAdmin = savedAdmin }()
+	settlementRejectedAtSend(z, setApprovedDAModesStep(g.User5.Address, 1, []byte{}))
+	settlementRejectedAtSend(z, setApprovedDAModesStep(g.User5.Address, 1, []byte{1}))
+	settlementRejectedAtSend(z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0, 0}))
 
-	newValue := big.NewInt(54321)
-	call := z.CallContract(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, newValue, constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, nil)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), constants.ErrForbiddenParam)
 
-	// repeating the same call before the delay elapses must not reset or
-	// prematurely apply the pending change
-	call = z.CallContract(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, newValue, constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, constants.ErrTimeChallengeNotDue)
-
-	_, context, err := api.GetFrontierContext(z.Chain(), types.SettlementContract)
+	registerDomains(t, z, 1)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	set, err := definition.GetApprovedDAModeSet(settlementStorage(t, z), 1)
 	common.FailIfErr(t, err)
-	if _, err := definition.GetPeripheryConfig(context.Storage()); err != constants.ErrDataNonExistent {
-		t.Fatalf("expected periphery config still unset after premature retry, got err %v", err)
+	if len(set.Modes) != 0 {
+		t.Fatalf("expected empty set while pending, got %v", set.Modes)
 	}
 
-	frMom, err := z.Chain().GetFrontierMomentumStore().GetFrontierMomentum()
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	set, err = definition.GetApprovedDAModeSet(settlementStorage(t, z), 1)
 	common.FailIfErr(t, err)
-	z.InsertMomentumsTo(frMom.Height + constants.MinSoftDelay)
-
-	call = z.CallContract(setPeripheryConfigStep(g.User5.Address, constants.WithdrawalDelayMin, newValue, constants.WithdrawalDelayMin))
-	z.InsertNewMomentum()
-	z.InsertNewMomentum()
-	call.Error(t, nil)
-
-	_, context, err = api.GetFrontierContext(z.Chain(), types.SettlementContract)
-	common.FailIfErr(t, err)
-	config, err := definition.GetPeripheryConfig(context.Storage())
-	common.FailIfErr(t, err)
-	if config.MaxBatchWithdrawal.Cmp(newValue) != 0 {
-		t.Fatalf("expected maxBatchWithdrawal %v, got %v", newValue, config.MaxBatchWithdrawal)
+	if !bytes.Equal(set.Modes, []byte{definition.DAModeBestEffort}) {
+		t.Fatalf("expected [0], got %v", set.Modes)
 	}
 }
-
 func TestSettlement_Pause_StateMachine(t *testing.T) {
 	z := mock.NewMockZenon(t)
 	defer z.StopPanic()
@@ -430,4 +826,68 @@ func TestSettlement_Update_RejectsAttachedAmount(t *testing.T) {
 		Amount:        big.NewInt(1),
 	}, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
 	z.InsertNewMomentum()
+}
+
+func TestSettlement_RegisterDomain_CapsAndSpecChangeUsesLongerDelay(t *testing.T) {
+	z := newSettlementZenon(t)
+	savedMin := constants.WithdrawalDelayMin
+	constants.WithdrawalDelayMin = 10
+	constants.MinAdministratorDelay = 10
+	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
+
+	oldCaps := valueCapsWithWindow(10, 1)
+	newCaps := valueCapsWithWindow(10, 2)
+	p := phase1Domain(1)
+	p.RuntimeUpgradeDelay = 40
+	p.ValueCaps = oldCaps
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+
+	bumped := hashFromByteForTest(9)
+	p.ValueCaps, p.StfSpecHash = newCaps, bumped
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+
+	// past the caps delay but before the runtime upgrade delay
+	advanceMomentums(t, z, 20)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrTimeChallengeNotDue)
+	record := domainRecordOf(t, z, 1)
+	if !bytes.Equal(record.ValueCaps, oldCaps) || record.StfSpecHash != types.ZeroHash {
+		t.Fatalf("expected old caps and hash while pending, got %+v", record)
+	}
+
+	advanceMomentums(t, z, 40)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	record = domainRecordOf(t, z, 1)
+	if !bytes.Equal(record.ValueCaps, newCaps) || record.StfSpecHash != bumped {
+		t.Fatalf("expected new caps and hash, got %+v", record)
+	}
+}
+
+func TestSettlement_RegisterDomain_StatusCallWithOtherCapsRestartsChallenge(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinAdministratorDelay = 20
+	scope := "RegisterDomain/1"
+	d := constants.WithdrawalDelayMin
+
+	oldCaps := valueCapsWithWindow(d, 1)
+	p := phase1Domain(1)
+	p.ValueCaps = oldCaps
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+
+	p.ValueCaps = valueCapsWithWindow(d, 2)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	h := challengeHash(t, z, scope)
+	if h.IsZero() {
+		t.Fatal("expected a pending challenge")
+	}
+
+	// a status change carrying caps other than the stored ones is a different
+	// change: it applies its status and replaces the pending challenge
+	p.ValueCaps, p.Status = valueCapsWithWindow(d, 3), definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
+	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusPaused || !bytes.Equal(record.ValueCaps, oldCaps) {
+		t.Fatalf("expected PAUSED with old caps, got %+v", record)
+	}
+	if got := challengeHash(t, z, scope); got.IsZero() || got == h {
+		t.Fatalf("expected a restarted challenge, old %v new %v", h, got)
+	}
 }

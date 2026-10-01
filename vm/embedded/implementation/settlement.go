@@ -1,6 +1,9 @@
 package implementation
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
 	"math/big"
 
 	"github.com/zenon-network/go-zenon/chain/nom"
@@ -59,24 +62,251 @@ func (p *SettlementUpdateMethod) ReceiveBlock(context vm_context.AccountVmContex
 	return nil, constants.ErrNotImplemented
 }
 
+// valueCapWindow returns the rolling-window length carried in the first 8
+// bytes (big-endian) of a non-empty valueCaps.
+func valueCapWindow(valueCaps []byte) uint64 {
+	return binary.BigEndian.Uint64(valueCaps[:8])
+}
+
+// getRegisteredDomain returns the domain's record, or ErrForbiddenParam
+// when the domain is not registered.
+func getRegisteredDomain(context vm_context.AccountVmContext, domainId uint32) (*definition.DomainRecord, error) {
+	record, err := definition.GetDomainRecord(context.Storage(), domainId)
+	if err == constants.ErrDataNonExistent {
+		return nil, constants.ErrForbiddenParam
+	}
+	return record, err
+}
+
 // ============================================================================
-// SetPeripheryConfig
+// RegisterDomain
 // ============================================================================
 
-type SettlementPeripheryConfigParam struct {
+type SettlementRegisterDomainParam struct {
+	DomainId            uint32
+	DomainClass         uint8
+	RuntimeKind         uint8
+	StfSpecHash         types.Hash
+	InputSource         uint8
+	ExecProfile         uint8
+	ForeignProfile      uint8
+	ProfileConfig       []byte
+	ChainBinding        []byte
+	MinExecutors        uint8
+	ProposerPolicy      uint8
+	ValueCaps           []byte
+	FinalityModel       uint8
+	Status              uint8
 	WithdrawalDelay     uint64
-	MaxBatchWithdrawal  *big.Int
 	RuntimeUpgradeDelay uint64
 }
 
-type SettlementSetPeripheryConfigMethod struct{ MethodName string }
+type SettlementRegisterDomainMethod struct{ MethodName string }
 
-func (p *SettlementSetPeripheryConfigMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+func (p *SettlementRegisterDomainMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
 	return plasmaTable.EmbeddedSimple, nil
 }
-func (p *SettlementSetPeripheryConfigMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+func (p *SettlementRegisterDomainMethod) ValidateSendBlock(block *nom.AccountBlock) error {
 	var err error
-	param := new(SettlementPeripheryConfigParam)
+	param := new(SettlementRegisterDomainParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	if param.DomainId == 0 {
+		return constants.ErrForbiddenParam
+	}
+	if param.DomainClass != definition.DomainClassExecution ||
+		param.RuntimeKind != definition.RuntimeKindWASM ||
+		param.InputSource != definition.InputSourceL1Native ||
+		param.ExecProfile != definition.ExecProfileAttestation ||
+		param.ForeignProfile != definition.ForeignProfileNone ||
+		param.ProposerPolicy != definition.ProposerPolicySingle ||
+		param.FinalityModel != definition.FinalityModelDelay ||
+		param.MinExecutors != 1 {
+		return constants.ErrForbiddenParam
+	}
+	if len(param.ChainBinding) != 0 || len(param.ProfileConfig) != 0 {
+		return constants.ErrForbiddenParam
+	}
+	if param.Status != definition.DomainStatusActive && param.Status != definition.DomainStatusPaused {
+		return constants.ErrForbiddenParam
+	}
+	if !constants.IsWithdrawalDelayInBounds(param.WithdrawalDelay) {
+		return constants.ErrForbiddenParam
+	}
+	if !constants.IsRuntimeUpgradeDelayValid(param.RuntimeUpgradeDelay, param.WithdrawalDelay) {
+		return constants.ErrForbiddenParam
+	}
+	if len(param.ValueCaps) != 0 {
+		if len(param.ValueCaps) < 8 || !constants.IsValueCapWindowValid(valueCapWindow(param.ValueCaps), param.WithdrawalDelay) {
+			return constants.ErrForbiddenParam
+		}
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName,
+		param.DomainId,
+		param.DomainClass,
+		param.RuntimeKind,
+		param.StfSpecHash,
+		param.InputSource,
+		param.ExecProfile,
+		param.ForeignProfile,
+		param.ProfileConfig,
+		param.ChainBinding,
+		param.MinExecutors,
+		param.ProposerPolicy,
+		param.ValueCaps,
+		param.FinalityModel,
+		param.Status,
+		param.WithdrawalDelay,
+		param.RuntimeUpgradeDelay,
+	)
+	return err
+}
+func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkNetworkAdmin(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementRegisterDomainParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	last, err := definition.GetLastDomainId(context.Storage())
+	if err != nil {
+		return nil, err
+	}
+	next := last + 1
+	if param.DomainId > next {
+		return nil, constants.ErrForbiddenParam
+	}
+
+	if param.DomainId == next {
+		record := &definition.DomainRecord{
+			DomainRecordKey: definition.DomainRecordKey{DomainId: param.DomainId},
+			DomainClass:     param.DomainClass,
+			RuntimeKind:     param.RuntimeKind,
+			StfSpecHash:     param.StfSpecHash,
+			InputSource:     param.InputSource,
+			ExecProfile:     param.ExecProfile,
+			ForeignProfile:  param.ForeignProfile,
+			ProfileConfig:   param.ProfileConfig,
+			ChainBinding:    param.ChainBinding,
+			MinExecutors:    param.MinExecutors,
+			ProposerPolicy:  param.ProposerPolicy,
+			ValueCaps:       param.ValueCaps,
+			FinalityModel:   param.FinalityModel,
+			Status:          param.Status,
+		}
+		config := &definition.DomainConfig{
+			DomainId:            param.DomainId,
+			WithdrawalDelay:     param.WithdrawalDelay,
+			RuntimeUpgradeDelay: param.RuntimeUpgradeDelay,
+		}
+		common.DealWithErr(record.Save(context.Storage()))
+		common.DealWithErr(config.Save(context.Storage()))
+		common.DealWithErr(definition.SetLastDomainId(context.Storage(), param.DomainId))
+		return nil, nil
+	}
+
+	record, err := definition.GetDomainRecord(context.Storage(), param.DomainId)
+	if err != nil {
+		return nil, err
+	}
+	config, err := definition.GetDomainConfig(context.Storage(), param.DomainId)
+	if err != nil {
+		return nil, err
+	}
+
+	if param.DomainClass != record.DomainClass ||
+		param.RuntimeKind != record.RuntimeKind ||
+		param.InputSource != record.InputSource ||
+		param.ExecProfile != record.ExecProfile ||
+		param.ForeignProfile != record.ForeignProfile ||
+		!bytes.Equal(param.ProfileConfig, record.ProfileConfig) ||
+		!bytes.Equal(param.ChainBinding, record.ChainBinding) ||
+		param.ProposerPolicy != record.ProposerPolicy ||
+		param.FinalityModel != record.FinalityModel {
+		return nil, constants.ErrForbiddenParam
+	}
+	if param.WithdrawalDelay != config.WithdrawalDelay || param.RuntimeUpgradeDelay != config.RuntimeUpgradeDelay {
+		return nil, constants.ErrForbiddenParam
+	}
+
+	custodyChanged := !bytes.Equal(param.ValueCaps, record.ValueCaps) || param.MinExecutors != record.MinExecutors
+	specChanged := param.StfSpecHash != record.StfSpecHash
+	statusChanged := param.Status != record.Status
+	if !custodyChanged && !specChanged && !statusChanged {
+		return nil, constants.ErrForbiddenParam
+	}
+
+	// Status never enters a time challenge and applies on every call that
+	// returns without error.
+	record.Status = param.Status
+
+	if custodyChanged || specChanged {
+		var delay uint64
+		if custodyChanged {
+			delay = constants.MinAdministratorDelay
+		}
+		if specChanged && config.RuntimeUpgradeDelay > delay {
+			delay = config.RuntimeUpgradeDelay
+		}
+		paramsHash := crypto.Hash(
+			common.Uint32ToBytes(param.DomainId),
+			param.StfSpecHash.Bytes(),
+			[]byte{param.MinExecutors},
+			common.Uint64ToBytes(param.WithdrawalDelay),
+			common.Uint64ToBytes(param.RuntimeUpgradeDelay),
+			param.ValueCaps,
+		)
+		timeChallengeInfo, err := TimeChallenge(context, fmt.Sprintf("%s/%d", p.MethodName, param.DomainId), paramsHash, delay)
+		if err != nil {
+			return nil, err
+		}
+		// if paramsHash is not zero it means we had a new challenge; only the status is applied
+		if !timeChallengeInfo.ParamsHash.IsZero() {
+			common.DealWithErr(record.Save(context.Storage()))
+			return nil, nil
+		}
+		record.ValueCaps = param.ValueCaps
+		record.MinExecutors = param.MinExecutors
+		record.StfSpecHash = param.StfSpecHash
+	}
+
+	common.DealWithErr(record.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// SetDomainConfig
+// ============================================================================
+
+type SettlementDomainConfigParam struct {
+	DomainId            uint32
+	WithdrawalDelay     uint64
+	RuntimeUpgradeDelay uint64
+}
+
+type SettlementSetDomainConfigMethod struct{ MethodName string }
+
+func (p *SettlementSetDomainConfigMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementSetDomainConfigMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementDomainConfigParam)
 
 	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
 		return constants.ErrUnpackError
@@ -89,17 +319,14 @@ func (p *SettlementSetPeripheryConfigMethod) ValidateSendBlock(block *nom.Accoun
 	if !constants.IsWithdrawalDelayInBounds(param.WithdrawalDelay) {
 		return constants.ErrForbiddenParam
 	}
-	if !constants.IsMaxBatchWithdrawalInBounds(param.MaxBatchWithdrawal) {
-		return constants.ErrForbiddenParam
-	}
 	if !constants.IsRuntimeUpgradeDelayValid(param.RuntimeUpgradeDelay, param.WithdrawalDelay) {
 		return constants.ErrForbiddenParam
 	}
 
-	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.WithdrawalDelay, param.MaxBatchWithdrawal, param.RuntimeUpgradeDelay)
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.WithdrawalDelay, param.RuntimeUpgradeDelay)
 	return err
 }
-func (p *SettlementSetPeripheryConfigMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+func (p *SettlementSetDomainConfigMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
 	if err := p.ValidateSendBlock(sendBlock); err != nil {
 		return nil, err
 	}
@@ -108,17 +335,25 @@ func (p *SettlementSetPeripheryConfigMethod) ReceiveBlock(context vm_context.Acc
 		return nil, err
 	}
 
-	param := new(SettlementPeripheryConfigParam)
+	param := new(SettlementDomainConfigParam)
 	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
 		return nil, err
 	}
 
+	record, err := getRegisteredDomain(context, param.DomainId)
+	if err != nil {
+		return nil, err
+	}
+	if len(record.ValueCaps) != 0 && !constants.IsValueCapWindowValid(valueCapWindow(record.ValueCaps), param.WithdrawalDelay) {
+		return nil, constants.ErrForbiddenParam
+	}
+
 	paramsHash := crypto.Hash(
+		common.Uint32ToBytes(param.DomainId),
 		common.Uint64ToBytes(param.WithdrawalDelay),
-		common.BigIntToBytes(param.MaxBatchWithdrawal),
 		common.Uint64ToBytes(param.RuntimeUpgradeDelay),
 	)
-	timeChallengeInfo, err := TimeChallenge(context, p.MethodName, paramsHash, constants.MinSoftDelay)
+	timeChallengeInfo, err := TimeChallenge(context, fmt.Sprintf("%s/%d", p.MethodName, param.DomainId), paramsHash, constants.MinSoftDelay)
 	if err != nil {
 		return nil, err
 	}
@@ -127,18 +362,175 @@ func (p *SettlementSetPeripheryConfigMethod) ReceiveBlock(context vm_context.Acc
 		return nil, nil
 	}
 
-	config, err := definition.GetPeripheryConfig(context.Storage())
-	if err != nil {
-		if err == constants.ErrDataNonExistent {
-			config = &definition.PeripheryConfig{}
-		} else {
-			return nil, err
+	config := &definition.DomainConfig{
+		DomainId:            param.DomainId,
+		WithdrawalDelay:     param.WithdrawalDelay,
+		RuntimeUpgradeDelay: param.RuntimeUpgradeDelay,
+	}
+	common.DealWithErr(config.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// SetAssetConfig
+// ============================================================================
+
+type SettlementAssetConfigParam struct {
+	DomainId           uint32
+	AssetId            types.Hash
+	MaxBatchWithdrawal *big.Int
+}
+
+type SettlementSetAssetConfigMethod struct{ MethodName string }
+
+func (p *SettlementSetAssetConfigMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementSetAssetConfigMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementAssetConfigParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	// the canonical asset id carries the ZTS in bytes [22:32]
+	for _, b := range param.AssetId[0:22] {
+		if b != 0 {
+			return constants.ErrForbiddenParam
 		}
 	}
-	config.WithdrawalDelay = param.WithdrawalDelay
-	config.MaxBatchWithdrawal = param.MaxBatchWithdrawal
-	config.RuntimeUpgradeDelay = param.RuntimeUpgradeDelay
+	if !constants.IsMaxBatchWithdrawalInBounds(param.MaxBatchWithdrawal) {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.AssetId, param.MaxBatchWithdrawal)
+	return err
+}
+func (p *SettlementSetAssetConfigMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkNetworkAdmin(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementAssetConfigParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getRegisteredDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+	stored, err := definition.GetAssetConfig(context.Storage(), param.DomainId, param.AssetId)
+	if err == nil {
+		if param.MaxBatchWithdrawal.Cmp(stored.MaxBatchWithdrawal) < 0 {
+			return nil, constants.ErrForbiddenParam
+		}
+	} else if err != constants.ErrDataNonExistent {
+		return nil, err
+	}
+
+	paramsHash := crypto.Hash(
+		common.Uint32ToBytes(param.DomainId),
+		param.AssetId.Bytes(),
+		common.BigIntToBytes(param.MaxBatchWithdrawal),
+	)
+	scope := fmt.Sprintf("%s/%d/%s", p.MethodName, param.DomainId, param.AssetId.String())
+	timeChallengeInfo, err := TimeChallenge(context, scope, paramsHash, constants.MinSoftDelay)
+	if err != nil {
+		return nil, err
+	}
+	// if paramsHash is not zero it means we had a new challenge and we can't go further to save the change into local db
+	if !timeChallengeInfo.ParamsHash.IsZero() {
+		return nil, nil
+	}
+
+	config := &definition.AssetConfig{
+		DomainId:           param.DomainId,
+		AssetId:            param.AssetId,
+		MaxBatchWithdrawal: param.MaxBatchWithdrawal,
+	}
 	common.DealWithErr(config.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// SetApprovedDAModes
+// ============================================================================
+
+type SettlementApprovedDAModesParam struct {
+	DomainId uint32
+	Modes    []byte
+}
+
+type SettlementSetApprovedDAModesMethod struct{ MethodName string }
+
+func (p *SettlementSetApprovedDAModesMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementSetApprovedDAModesMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementApprovedDAModesParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	if len(param.Modes) == 0 {
+		return constants.ErrForbiddenParam
+	}
+	seen := make(map[byte]bool)
+	for _, mode := range param.Modes {
+		if mode != definition.DAModeBestEffort || seen[mode] {
+			return constants.ErrForbiddenParam
+		}
+		seen[mode] = true
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.Modes)
+	return err
+}
+func (p *SettlementSetApprovedDAModesMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkNetworkAdmin(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementApprovedDAModesParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getRegisteredDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	paramsHash := crypto.Hash(common.Uint32ToBytes(param.DomainId), param.Modes)
+	timeChallengeInfo, err := TimeChallenge(context, fmt.Sprintf("%s/%d", p.MethodName, param.DomainId), paramsHash, constants.MinSoftDelay)
+	if err != nil {
+		return nil, err
+	}
+	// if paramsHash is not zero it means we had a new challenge and we can't go further to save the change into local db
+	if !timeChallengeInfo.ParamsHash.IsZero() {
+		return nil, nil
+	}
+
+	set := &definition.ApprovedDAModeSet{DomainId: param.DomainId, Modes: param.Modes}
+	common.DealWithErr(set.Save(context.Storage()))
 	return nil, nil
 }
 
