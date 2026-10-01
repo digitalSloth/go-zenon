@@ -20,10 +20,34 @@ const (
 		{"type":"function","name":"Update","inputs":[
 			{"name":"domainId","type":"uint32"}]},
 
-		{"type":"function","name":"SetPeripheryConfig","inputs":[
+		{"type":"function","name":"RegisterDomain","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"domainClass","type":"uint8"},
+			{"name":"runtimeKind","type":"uint8"},
+			{"name":"stfSpecHash","type":"hash"},
+			{"name":"inputSource","type":"uint8"},
+			{"name":"execProfile","type":"uint8"},
+			{"name":"foreignProfile","type":"uint8"},
+			{"name":"profileConfig","type":"bytes"},
+			{"name":"chainBinding","type":"bytes"},
+			{"name":"minExecutors","type":"uint8"},
+			{"name":"proposerPolicy","type":"uint8"},
+			{"name":"valueCaps","type":"bytes"},
+			{"name":"finalityModel","type":"uint8"},
+			{"name":"status","type":"uint8"},
 			{"name":"withdrawalDelay","type":"uint64"},
-			{"name":"maxBatchWithdrawal","type":"uint256"},
 			{"name":"runtimeUpgradeDelay","type":"uint64"}]},
+		{"type":"function","name":"SetDomainConfig","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"withdrawalDelay","type":"uint64"},
+			{"name":"runtimeUpgradeDelay","type":"uint64"}]},
+		{"type":"function","name":"SetAssetConfig","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"assetId","type":"hash"},
+			{"name":"maxBatchWithdrawal","type":"uint256"}]},
+		{"type":"function","name":"SetApprovedDAModes","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"modes","type":"bytes"}]},
 		{"type":"function","name":"Pause","inputs":[
 			{"name":"domainId","type":"uint32"},
 			{"name":"isGlobal","type":"bool"},
@@ -41,7 +65,6 @@ const (
 			{"name":"foreignProfile","type":"uint8"},
 			{"name":"profileConfig","type":"bytes"},
 			{"name":"chainBinding","type":"bytes"},
-			{"name":"executors","type":"address[]"},
 			{"name":"minExecutors","type":"uint8"},
 			{"name":"proposerPolicy","type":"uint8"},
 			{"name":"valueCaps","type":"bytes"},
@@ -118,11 +141,21 @@ const (
 			{"name":"status","type":"uint8"}
 		]},
 
-		{"type":"variable","name":"peripheryConfig","inputs":[
+		{"type":"variable","name":"domainConfig","inputs":[
 			{"name":"withdrawalDelay","type":"uint64"},
-			{"name":"maxBatchWithdrawal","type":"uint256"},
-			{"name":"runtimeUpgradeDelay","type":"uint64"},
-			{"name":"reserved","type":"bytes"}
+			{"name":"runtimeUpgradeDelay","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"assetConfig","inputs":[
+			{"name":"maxBatchWithdrawal","type":"uint256"}
+		]},
+
+		{"type":"variable","name":"approvedDAModeSet","inputs":[
+			{"name":"modes","type":"bytes"}
+		]},
+
+		{"type":"variable","name":"domainCounter","inputs":[
+			{"name":"lastDomainId","type":"uint32"}
 		]},
 
 		{"type":"variable","name":"pauseState","inputs":[
@@ -136,7 +169,13 @@ const (
 
 		{"type":"variable","name":"assetRegistryEntry","inputs":[
 			{"name":"custodyMode","type":"uint8"},
-			{"name":"mintedSupply","type":"uint256"}
+			{"name":"foreignChainId","type":"bytes"},
+			{"name":"foreignAssetRef","type":"bytes"},
+			{"name":"decimalsPolicy","type":"bytes"},
+			{"name":"provenForeignLocks","type":"uint256"},
+			{"name":"mintedSupply","type":"uint256"},
+			{"name":"burnedSupply","type":"uint256"},
+			{"name":"authorizedForeignRelease","type":"uint256"}
 		]},
 
 		{"type":"variable","name":"messageState","inputs":[
@@ -156,11 +195,14 @@ const (
 
 	SettlementUpdateMethodName = "Update"
 
+	// declared, not yet wired
 	SettlementSetPeripheryConfigMethodName  = "SetPeripheryConfig"
 	SettlementInitiateEscapeHatchMethodName = "InitiateEscapeHatch"
 
-	// declared for Tickets 11+, not yet wired
-	SettlementRegisterDomainMethodName = "RegisterDomain"
+	SettlementRegisterDomainMethodName     = "RegisterDomain"
+	SettlementSetDomainConfigMethodName    = "SetDomainConfig"
+	SettlementSetAssetConfigMethodName     = "SetAssetConfig"
+	SettlementSetApprovedDAModesMethodName = "SetApprovedDAModes"
 	// declared for Tickets 11+, not yet wired
 	SettlementRegisterExecutorMethodName = "RegisterExecutor"
 	// declared for Tickets 11+, not yet wired
@@ -197,7 +239,10 @@ const (
 	releaseQueueMetaVariableName          = "releaseQueueMeta"
 	deployRecordVariableName              = "deployRecord"
 	executorBondVariableName              = "executorBond"
-	peripheryConfigVariableName           = "peripheryConfig"
+	domainConfigVariableName              = "domainConfig"
+	assetConfigVariableName               = "assetConfig"
+	approvedDAModeSetVariableName         = "approvedDAModeSet"
+	domainCounterVariableName             = "domainCounter"
 	pauseStateVariableName                = "pauseState"
 	escapeHatchRecordVariableName         = "escapeHatchRecord"
 	assetRegistryEntryVariableName        = "assetRegistryEntry"
@@ -222,7 +267,7 @@ const (
 const (
 	InputSourceL1Native uint8 = iota
 	InputSourceL1Relayed
-	InputSourceExternalObserved
+	// value 2 is retired and must not be reassigned
 )
 
 // DomainRecord.execProfile
@@ -259,6 +304,11 @@ const (
 const (
 	DomainStatusActive uint8 = iota
 	DomainStatusPaused
+)
+
+// BatchEntry.daMode
+const (
+	DAModeBestEffort uint8 = 0
 )
 
 // BatchEntry.state
@@ -298,7 +348,7 @@ var (
 	deployRecordPrefix           = []byte{0x0A} // key: domainId ‖ codeHash (32B)
 	processedOutboxPrefix        = []byte{0x0B} // key: outboxId (32B)
 	executorBondPrefix           = []byte{0x0C} // key: domainId ‖ executorAddress
-	peripheryConfigKey           = []byte{0x0D} // singleton
+	_                            = []byte{0x0D} // reserved: network-wide Periphery record
 	assetRegistryPrefix          = []byte{0x0E} // reserved, key: domainId ‖ assetId (32B)
 	messageStatePrefix           = []byte{0x0F} // reserved, key: outboxId (32B)
 	fraudRefereeRegistryPrefix   = []byte{0x10} // reserved, key: domainId
@@ -306,6 +356,10 @@ var (
 	globalPauseStateKey          = []byte{0x12} // PauseState, singleton
 	domainPauseStatePrefix       = []byte{0x13} // PauseState, key: domainId (u32 BE)
 	escapeHatchPrefix            = []byte{0x14} // EscapeHatchRecord, key: domainId (u32 BE)
+	domainConfigPrefix           = []byte{0x15} // DomainConfig, key: domainId (u32 BE)
+	assetConfigPrefix            = []byte{0x16} // AssetConfig, key: domainId ‖ assetId (32B)
+	approvedDAModeSetPrefix      = []byte{0x17} // ApprovedDAModeSet, key: domainId (u32 BE)
+	domainCounterKey             = []byte{0x18} // last assigned domainId, singleton
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -347,7 +401,6 @@ type DomainRecord struct {
 	ForeignProfile uint8
 	ProfileConfig  []byte
 	ChainBinding   []byte
-	Executors      []types.Address
 	MinExecutors   uint8
 	ProposerPolicy uint8
 	ValueCaps      []byte
@@ -366,7 +419,6 @@ func (d *DomainRecord) Save(context db.DB) error {
 		d.ForeignProfile,
 		d.ProfileConfig,
 		d.ChainBinding,
-		d.Executors,
 		d.MinExecutors,
 		d.ProposerPolicy,
 		d.ValueCaps,
@@ -1068,41 +1120,138 @@ func GetExecutorBond(context db.DB, domainId uint32, executor types.Address) (*E
 }
 
 // ============================================================================
-// Periphery config (singleton)
+// Domain config, asset config, approved DA modes, domain counter
 // ============================================================================
 
-type PeripheryConfig struct {
+type DomainConfig struct {
+	DomainId            uint32
 	WithdrawalDelay     uint64
-	MaxBatchWithdrawal  *big.Int
 	RuntimeUpgradeDelay uint64
-	Reserved            []byte
 }
 
-func (p *PeripheryConfig) Save(context db.DB) error {
+func getDomainConfigKey(domainId uint32) []byte {
+	return common.JoinBytes(domainConfigPrefix, uint32ToBytesBE(domainId))
+}
+func (c *DomainConfig) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		peripheryConfigVariableName,
-		p.WithdrawalDelay,
-		p.MaxBatchWithdrawal,
-		p.RuntimeUpgradeDelay,
-		p.Reserved,
+		domainConfigVariableName,
+		c.WithdrawalDelay,
+		c.RuntimeUpgradeDelay,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(peripheryConfigKey, data)
+	return context.Put(getDomainConfigKey(c.DomainId), data)
 }
-func GetPeripheryConfig(context db.DB) (*PeripheryConfig, error) {
-	if data, err := context.Get(peripheryConfigKey); err != nil {
+func GetDomainConfig(context db.DB, domainId uint32) (*DomainConfig, error) {
+	if data, err := context.Get(getDomainConfigKey(domainId)); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return nil, constants.ErrDataNonExistent
 	} else {
-		config := new(PeripheryConfig)
-		if err := ABISettlement.UnpackVariable(config, peripheryConfigVariableName, data); err != nil {
+		config := new(DomainConfig)
+		if err := ABISettlement.UnpackVariable(config, domainConfigVariableName, data); err != nil {
 			return nil, err
 		}
+		config.DomainId = domainId
 		return config, nil
 	}
+}
+
+type AssetConfig struct {
+	DomainId           uint32
+	AssetId            types.Hash
+	MaxBatchWithdrawal *big.Int
+}
+
+func getAssetConfigKey(domainId uint32, assetId types.Hash) []byte {
+	return common.JoinBytes(assetConfigPrefix, uint32ToBytesBE(domainId), assetId.Bytes())
+}
+func (c *AssetConfig) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		assetConfigVariableName,
+		c.MaxBatchWithdrawal,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getAssetConfigKey(c.DomainId, c.AssetId), data)
+}
+func GetAssetConfig(context db.DB, domainId uint32, assetId types.Hash) (*AssetConfig, error) {
+	if data, err := context.Get(getAssetConfigKey(domainId, assetId)); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	} else {
+		config := new(AssetConfig)
+		if err := ABISettlement.UnpackVariable(config, assetConfigVariableName, data); err != nil {
+			return nil, err
+		}
+		config.DomainId = domainId
+		config.AssetId = assetId
+		return config, nil
+	}
+}
+
+// ApprovedDAModeSet holds one byte per approved DAMode.
+type ApprovedDAModeSet struct {
+	DomainId uint32
+	Modes    []byte
+}
+
+func getApprovedDAModeSetKey(domainId uint32) []byte {
+	return common.JoinBytes(approvedDAModeSetPrefix, uint32ToBytesBE(domainId))
+}
+func (s *ApprovedDAModeSet) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		approvedDAModeSetVariableName,
+		s.Modes,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getApprovedDAModeSetKey(s.DomainId), data)
+}
+func GetApprovedDAModeSet(context db.DB, domainId uint32) (*ApprovedDAModeSet, error) {
+	if data, err := context.Get(getApprovedDAModeSetKey(domainId)); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &ApprovedDAModeSet{DomainId: domainId}, nil
+	} else {
+		set := new(ApprovedDAModeSet)
+		if err := ABISettlement.UnpackVariable(set, approvedDAModeSetVariableName, data); err != nil {
+			return nil, err
+		}
+		set.DomainId = domainId
+		return set, nil
+	}
+}
+
+type domainCounter struct {
+	LastDomainId uint32
+}
+
+// GetLastDomainId returns the last assigned domainId, or 0 when no domain
+// is registered.
+func GetLastDomainId(context db.DB) (uint32, error) {
+	if data, err := context.Get(domainCounterKey); err != nil {
+		return 0, err
+	} else if len(data) == 0 {
+		return 0, nil
+	} else {
+		counter := new(domainCounter)
+		if err := ABISettlement.UnpackVariable(counter, domainCounterVariableName, data); err != nil {
+			return 0, err
+		}
+		return counter.LastDomainId, nil
+	}
+}
+func SetLastDomainId(context db.DB, domainId uint32) error {
+	data, err := ABISettlement.PackVariable(domainCounterVariableName, domainId)
+	if err != nil {
+		return err
+	}
+	return context.Put(domainCounterKey, data)
 }
 
 // ============================================================================
@@ -1242,13 +1391,19 @@ func GetEscapeHatchRecord(context db.DB, domainId uint32) (*EscapeHatchRecord, e
 // Reserved storage entities (schema present, unused in Phase 1)
 // ============================================================================
 
-// AssetRegistryEntry reserves the per-(domain, asset) custody-mode + MINTED
-// counter schema. No callers exist in Phase 1.
+// AssetRegistryEntry reserves the per-(domain, asset) custody, foreign-binding
+// and supply-counter schema. No callers exist in Phase 1.
 type AssetRegistryEntry struct {
-	DomainId     uint32
-	AssetId      types.Hash
-	CustodyMode  uint8
-	MintedSupply *big.Int
+	DomainId                 uint32
+	AssetId                  types.Hash
+	CustodyMode              uint8
+	ForeignChainId           []byte
+	ForeignAssetRef          []byte
+	DecimalsPolicy           []byte
+	ProvenForeignLocks       *big.Int
+	MintedSupply             *big.Int
+	BurnedSupply             *big.Int
+	AuthorizedForeignRelease *big.Int
 }
 
 func getAssetRegistryKey(domainId uint32, assetId types.Hash) []byte {
@@ -1258,7 +1413,13 @@ func (e *AssetRegistryEntry) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
 		assetRegistryEntryVariableName,
 		e.CustodyMode,
+		e.ForeignChainId,
+		e.ForeignAssetRef,
+		e.DecimalsPolicy,
+		e.ProvenForeignLocks,
 		e.MintedSupply,
+		e.BurnedSupply,
+		e.AuthorizedForeignRelease,
 	)
 	if err != nil {
 		return err

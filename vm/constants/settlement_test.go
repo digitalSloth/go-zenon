@@ -48,6 +48,12 @@ func TestIsRuntimeUpgradeDelayValid(t *testing.T) {
 	if IsRuntimeUpgradeDelayValid(99, 100) {
 		t.Fatal("expected upgradeDelay < activeWithdrawalDelay to be rejected")
 	}
+	if !IsRuntimeUpgradeDelayValid(WithdrawalDelayMax, 100) {
+		t.Fatal("expected WithdrawalDelayMax to be valid")
+	}
+	if IsRuntimeUpgradeDelayValid(WithdrawalDelayMax+1, 100) {
+		t.Fatal("expected a delay above WithdrawalDelayMax to be rejected")
+	}
 }
 
 func TestIsValueCapWindowValid(t *testing.T) {
