@@ -35,7 +35,7 @@ var (
 	SettlementContract  = parseEmbedded("z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9")
 
 	EmbeddedContracts = []Address{PlasmaContract, PillarContract, TokenContract, SentinelContract, SwapContract, StakeContract, SporkContract, LiquidityContract, AcceleratorContract, HtlcContract, PtlcContract, BridgeContract, SettlementContract}
-	EmbeddedWUpdate   = []Address{PillarContract, StakeContract, SentinelContract, LiquidityContract, AcceleratorContract}
+	EmbeddedWUpdate   = []Address{PillarContract, StakeContract, SentinelContract, LiquidityContract, AcceleratorContract, SettlementContract}
 
 	SporkAddress *Address
 
