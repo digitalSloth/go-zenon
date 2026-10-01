@@ -47,7 +47,6 @@ func TestDomainRecord_RoundTrip_FullFields(t *testing.T) {
 		ForeignProfile:  ForeignProfileNone,
 		ProfileConfig:   []byte("attester-policy-config"),
 		ChainBinding:    []byte("chain-binding-blob"),
-		Executors:       []types.Address{addressFromByte(2), addressFromByte(3)},
 		MinExecutors:    2,
 		ProposerPolicy:  ProposerPolicySingle,
 		ValueCaps:       []byte("value-caps-blob"),
@@ -81,14 +80,6 @@ func TestDomainRecord_RoundTrip_FullFields(t *testing.T) {
 	if string(got.ValueCaps) != string(record.ValueCaps) {
 		t.Fatalf("valueCaps mismatch: got %q want %q", got.ValueCaps, record.ValueCaps)
 	}
-	if len(got.Executors) != len(record.Executors) {
-		t.Fatalf("executors length mismatch: got %d want %d", len(got.Executors), len(record.Executors))
-	}
-	for i := range record.Executors {
-		if got.Executors[i] != record.Executors[i] {
-			t.Fatalf("executor[%d] mismatch: got %v want %v", i, got.Executors[i], record.Executors[i])
-		}
-	}
 }
 
 func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
@@ -104,7 +95,6 @@ func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
 		ForeignProfile:  ForeignProfileNone,
 		ProfileConfig:   []byte{},
 		ChainBinding:    []byte{},
-		Executors:       []types.Address{addressFromByte(9)},
 		MinExecutors:    1,
 		ProposerPolicy:  ProposerPolicySingle,
 		ValueCaps:       []byte{},
@@ -121,9 +111,6 @@ func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
 	}
 	if len(got.ProfileConfig) != 0 || len(got.ChainBinding) != 0 || len(got.ValueCaps) != 0 {
 		t.Fatalf("expected empty reserved blobs, got %+v", got)
-	}
-	if len(got.Executors) != 1 || got.Executors[0] != record.Executors[0] {
-		t.Fatalf("executors mismatch: %+v", got.Executors)
 	}
 }
 
@@ -378,7 +365,6 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"deployRecord":           deployRecordPrefix,
 		"processedOutbox":        processedOutboxPrefix,
 		"executorBond":           executorBondPrefix,
-		"peripheryConfig":        peripheryConfigKey,
 		"assetRegistry":          assetRegistryPrefix,
 		"messageState":           messageStatePrefix,
 		"fraudRefereeRegistry":   fraudRefereeRegistryPrefix,
@@ -386,6 +372,10 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"globalPauseState":       globalPauseStateKey,
 		"domainPauseState":       domainPauseStatePrefix,
 		"escapeHatch":            escapeHatchPrefix,
+		"domainConfig":           domainConfigPrefix,
+		"assetConfig":            assetConfigPrefix,
+		"approvedDAModeSet":      approvedDAModeSetPrefix,
+		"domainCounter":          domainCounterKey,
 	}
 
 	seen := make(map[byte]string, len(prefixes))
@@ -517,30 +507,145 @@ func TestExecutorBond_ReplacementDoesNotStrandOutgoingBond(t *testing.T) {
 	}
 }
 
-func TestPeripheryConfig_RoundTrip(t *testing.T) {
+func TestDomainConfig_RoundTrip(t *testing.T) {
 	memDb := db.DisableNotFound(db.NewMemDB())
 
-	if _, err := GetPeripheryConfig(memDb); err != constants.ErrDataNonExistent {
+	if _, err := GetDomainConfig(memDb, 1); err != constants.ErrDataNonExistent {
 		t.Fatalf("expected ErrDataNonExistent, got %v", err)
 	}
 
-	config := &PeripheryConfig{
-		WithdrawalDelay:     1234,
-		MaxBatchWithdrawal:  big.NewInt(56789),
-		RuntimeUpgradeDelay: 2345,
-		Reserved:            []byte("reserved-blob"),
+	first := &DomainConfig{DomainId: 1, WithdrawalDelay: 1234, RuntimeUpgradeDelay: 2345}
+	second := &DomainConfig{DomainId: 2, WithdrawalDelay: 11, RuntimeUpgradeDelay: 22}
+	if err := first.Save(memDb); err != nil {
+		t.Fatal(err)
 	}
+	if err := second.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []*DomainConfig{first, second} {
+		got, err := GetDomainConfig(memDb, want.DomainId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if *got != *want {
+			t.Fatalf("domain config mismatch: got %+v want %+v", got, want)
+		}
+	}
+}
+
+func TestAssetConfig_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	assetA, assetB := hashFromByte(0xA1), hashFromByte(0xB2)
+
+	if _, err := GetAssetConfig(memDb, 1, assetA); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent, got %v", err)
+	}
+
+	config := &AssetConfig{DomainId: 1, AssetId: assetA, MaxBatchWithdrawal: big.NewInt(56789)}
 	if err := config.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
-	got, err := GetPeripheryConfig(memDb)
+	got, err := GetAssetConfig(memDb, 1, assetA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.WithdrawalDelay != config.WithdrawalDelay || got.MaxBatchWithdrawal.Cmp(config.MaxBatchWithdrawal) != 0 ||
-		got.RuntimeUpgradeDelay != config.RuntimeUpgradeDelay ||
-		string(got.Reserved) != string(config.Reserved) {
-		t.Fatalf("periphery config mismatch: got %+v want %+v", got, config)
+	if got.DomainId != 1 || got.AssetId != assetA || got.MaxBatchWithdrawal.Cmp(big.NewInt(56789)) != 0 {
+		t.Fatalf("asset config mismatch: got %+v", got)
+	}
+
+	if _, err := GetAssetConfig(memDb, 1, assetB); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected per-asset isolation, got %v", err)
+	}
+	if _, err := GetAssetConfig(memDb, 2, assetA); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected per-domain isolation, got %v", err)
+	}
+}
+
+func TestApprovedDAModeSet_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	empty, err := GetApprovedDAModeSet(memDb, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty.Modes) != 0 {
+		t.Fatalf("expected empty set, got %+v", empty)
+	}
+
+	set := &ApprovedDAModeSet{DomainId: 1, Modes: []byte{DAModeBestEffort}}
+	if err := set.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetApprovedDAModeSet(memDb, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DomainId != 1 || string(got.Modes) != string(set.Modes) {
+		t.Fatalf("mode set mismatch: got %+v", got)
+	}
+
+	other, err := GetApprovedDAModeSet(memDb, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other.Modes) != 0 {
+		t.Fatalf("expected per-domain isolation, got %+v", other)
+	}
+}
+
+func TestLastDomainId(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	last, err := GetLastDomainId(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != 0 {
+		t.Fatalf("expected 0 when absent, got %d", last)
+	}
+
+	if err := SetLastDomainId(memDb, 5); err != nil {
+		t.Fatal(err)
+	}
+	last, err = GetLastDomainId(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last != 5 {
+		t.Fatalf("expected 5, got %d", last)
+	}
+}
+
+func TestAssetRegistryEntry_RoundTrip_FullFields(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	assetId := hashFromByte(0xC3)
+
+	entry := &AssetRegistryEntry{
+		DomainId:                 3,
+		AssetId:                  assetId,
+		CustodyMode:              1,
+		ForeignChainId:           []byte("chain"),
+		ForeignAssetRef:          []byte("asset-ref"),
+		DecimalsPolicy:           []byte("decimals"),
+		ProvenForeignLocks:       big.NewInt(11),
+		MintedSupply:             big.NewInt(22),
+		BurnedSupply:             big.NewInt(33),
+		AuthorizedForeignRelease: big.NewInt(44),
+	}
+	if err := entry.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetAssetRegistryEntry(memDb, 3, assetId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CustodyMode != 1 ||
+		string(got.ForeignChainId) != "chain" || string(got.ForeignAssetRef) != "asset-ref" ||
+		string(got.DecimalsPolicy) != "decimals" ||
+		got.ProvenForeignLocks.Cmp(big.NewInt(11)) != 0 || got.MintedSupply.Cmp(big.NewInt(22)) != 0 ||
+		got.BurnedSupply.Cmp(big.NewInt(33)) != 0 || got.AuthorizedForeignRelease.Cmp(big.NewInt(44)) != 0 {
+		t.Fatalf("asset registry entry mismatch: got %+v want %+v", got, entry)
 	}
 }
 
