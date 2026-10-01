@@ -96,7 +96,7 @@ var (
 	// periodic Update method; pillars send Update transactions to
 	// these addresses when enough time has passed since the last
 	// update (see pillar/worker_updater.go).
-	EmbeddedWUpdate = []Address{PillarContract, StakeContract, SentinelContract, LiquidityContract, AcceleratorContract}
+	EmbeddedWUpdate = []Address{PillarContract, StakeContract, SentinelContract, LiquidityContract, AcceleratorContract, SettlementContract}
 
 	// SporkAddress is the address authorized to create and activate
 	// sporks on the current network. It is nil until chain

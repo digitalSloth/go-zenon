@@ -284,5 +284,7 @@ var (
 
 	// ErrNotImplemented rejects a Settlement method that has no
 	// implementation yet.
-	ErrNotImplemented = errors.New("not implemented")
+	ErrNotImplemented        = errors.New("not implemented")
+	ErrSettlementRelayPaused = errors.New("settlement relay paused")
+	ErrSettlementFeeGuard    = errors.New("settlement fee guard violated")
 )

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"math"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm/constants"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
+
+	"github.com/inconshreveable/log15"
 
 	g "github.com/zenon-network/go-zenon/chain/genesis/mock"
 	"github.com/zenon-network/go-zenon/chain/nom"
@@ -56,7 +59,7 @@ func TestSettlement_RejectedBeforeSpork(t *testing.T) {
 	z.InsertSendBlock(&nom.AccountBlock{
 		Address:       g.User1.Address,
 		ToAddress:     types.SettlementContract,
-		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementUpdateMethodName, uint32(0)),
+		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementReleaseWithdrawalsMethodName, uint32(0)),
 		TokenStandard: types.ZnnTokenStandard,
 		Amount:        big.NewInt(0),
 	}, constants.ErrContractDoesntExist, mock.SkipVmChanges)
@@ -795,14 +798,14 @@ func TestSettlement_DispatchAfterSpork(t *testing.T) {
 	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, `
 t=2001-09-09T01:46:50+0000 lvl=dbug msg=created module=embedded contract=spork spork="&{Id:bed2a35fd610e53f6a6c0ffaacc6638fef0588003588cff784b226d12aad4027 Name:spork-offchain-execution Description:activate spork for offchain execution Activated:false EnforcementHeight:0}"
 t=2001-09-09T01:47:00+0000 lvl=dbug msg=activated module=embedded contract=spork spork="&{Id:bed2a35fd610e53f6a6c0ffaacc6638fef0588003588cff784b226d12aad4027 Name:spork-offchain-execution Description:activate spork for offchain execution Activated:true EnforcementHeight:9}"
-t=2001-09-09T01:50:00+0000 lvl=dbug msg="settlement method dispatched (not implemented)" module=embedded contract=settlement method=Update address=z1qzal6c5s9rjnnxd2z7dvdhjxpmmj4fmw56a0mz
+t=2001-09-09T01:50:00+0000 lvl=dbug msg="settlement method dispatched (not implemented)" module=embedded contract=settlement method=ReleaseWithdrawals address=z1qzal6c5s9rjnnxd2z7dvdhjxpmmj4fmw56a0mz
 `)
 	activateOffchainExecution(t, z)
 
 	defer z.CallContract(&nom.AccountBlock{
 		Address:       g.User1.Address,
 		ToAddress:     types.SettlementContract,
-		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementUpdateMethodName, uint32(0)),
+		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementReleaseWithdrawalsMethodName, uint32(0)),
 		TokenStandard: types.ZnnTokenStandard,
 		Amount:        big.NewInt(0),
 	}).Error(t, constants.ErrNotImplemented)
@@ -810,7 +813,7 @@ t=2001-09-09T01:50:00+0000 lvl=dbug msg="settlement method dispatched (not imple
 	z.InsertNewMomentum()
 }
 
-// Update moves value out of custody and carries no payment of its own, so an
+// Update and ReleaseWithdrawals carry no payment of their own, so an
 // attached amount is always a mistake and is rejected at send validation.
 func TestSettlement_Update_RejectsAttachedAmount(t *testing.T) {
 	z := mock.NewMockZenon(t)
@@ -821,11 +824,246 @@ func TestSettlement_Update_RejectsAttachedAmount(t *testing.T) {
 	z.InsertSendBlock(&nom.AccountBlock{
 		Address:       g.User1.Address,
 		ToAddress:     types.SettlementContract,
-		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementUpdateMethodName, uint32(0)),
+		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementUpdateMethodName),
 		TokenStandard: types.ZnnTokenStandard,
 		Amount:        big.NewInt(1),
 	}, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
 	z.InsertNewMomentum()
+}
+
+func TestSettlement_ReleaseWithdrawals_RejectsAttachedAmount(t *testing.T) {
+	z := mock.NewMockZenon(t)
+	defer z.StopPanic()
+	activateOffchainExecution(t, z)
+	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, ``)
+
+	z.InsertSendBlock(&nom.AccountBlock{
+		Address:       g.User1.Address,
+		ToAddress:     types.SettlementContract,
+		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementReleaseWithdrawalsMethodName, uint32(0)),
+		TokenStandard: types.ZnnTokenStandard,
+		Amount:        big.NewInt(1),
+	}, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+}
+
+func TestSettlement_CollectReward_RejectsAttachedAmount(t *testing.T) {
+	z := newSettlementZenon(t)
+	block := settlementStep(g.User1.Address, definition.SettlementCollectRewardMethodName)
+	block.Amount = big.NewInt(1)
+	z.InsertSendBlock(block, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+}
+
+func registerExecutorStep(admin types.Address, pillarName string, executor types.Address) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementRegisterExecutorMethodName, pillarName, executor)
+}
+
+func setPeripheryConfigStep(admin types.Address, bytecode, state *big.Int) *nom.AccountBlock {
+	return settlementStep(admin, definition.SettlementSetPeripheryConfigMethodName, bytecode, state)
+}
+
+func TestSettlement_RegisterExecutor_AdminGateAndUnknownPillar(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinAdministratorDelay = 10
+
+	settlementCall(t, z, registerExecutorStep(g.User1.Address, g.Pillar1Name, g.User1.Address), constants.ErrPermissionDenied)
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, "no-such-pillar", g.User1.Address), constants.ErrForbiddenParam)
+
+	if set, err := definition.GetExecutorSet(settlementStorage(t, z)); err != nil || len(set) != 0 {
+		t.Fatalf("expected an empty executor set, got %v err %v", set, err)
+	}
+}
+
+func TestSettlement_RegisterExecutor_TimeChallengeAndReplacement(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinAdministratorDelay = 10
+
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, g.User1.Address), nil)
+	if set, err := definition.GetExecutorSet(settlementStorage(t, z)); err != nil || len(set) != 0 {
+		t.Fatalf("expected no member while the challenge is pending, got %v err %v", set, err)
+	}
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, g.User1.Address), constants.ErrTimeChallengeNotDue)
+
+	advanceMomentums(t, z, constants.MinAdministratorDelay)
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, g.User1.Address), nil)
+	set, err := definition.GetExecutorSet(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if len(set) != 1 || set[0].PillarName != g.Pillar1Name || set[0].ExecutorAddress != g.User1.Address ||
+		set[0].Status != definition.ExecutorStatusActive || set[0].RegistrationHeight == 0 {
+		t.Fatalf("expected one active member for pillar 1, got %+v", set)
+	}
+
+	// a second registration replaces the member
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar2Name, g.User2.Address), nil)
+	advanceMomentums(t, z, constants.MinAdministratorDelay)
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar2Name, g.User2.Address), nil)
+	set, err = definition.GetExecutorSet(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if len(set) != 1 || set[0].PillarName != g.Pillar2Name || set[0].ExecutorAddress != g.User2.Address {
+		t.Fatalf("expected exactly the replacement member, got %+v", set)
+	}
+}
+
+func TestSettlement_RegisterExecutor_SamePillarNewAddressReplacesAddress(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinAdministratorDelay = 10
+
+	for _, executor := range []types.Address{g.User1.Address, g.User2.Address} {
+		settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, executor), nil)
+		advanceMomentums(t, z, constants.MinAdministratorDelay)
+		settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, executor), nil)
+	}
+	set, err := definition.GetExecutorSet(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if len(set) != 1 || set[0].ExecutorAddress != g.User2.Address {
+		t.Fatalf("expected one member with the new address, got %+v", set)
+	}
+}
+
+func TestSettlement_SetPeripheryConfig_BoundsAndAdminGate(t *testing.T) {
+	z := newSettlementZenon(t)
+	floor := constants.ZnnPerByteOfBytecodeFloor
+	ceiling := constants.ZnnPerByteOfBytecodeCeiling
+	ok := big.NewInt(5)
+
+	settlementRejectedAtSend(z, setPeripheryConfigStep(g.User5.Address, new(big.Int).Sub(floor, big.NewInt(1)), ok))
+	settlementRejectedAtSend(z, setPeripheryConfigStep(g.User5.Address, ok, new(big.Int).Sub(constants.ZnnPerByteOfStateFloor, big.NewInt(1))))
+	settlementRejectedAtSend(z, setPeripheryConfigStep(g.User5.Address, new(big.Int).Add(ceiling, big.NewInt(1)), ok))
+	settlementRejectedAtSend(z, setPeripheryConfigStep(g.User5.Address, ok, new(big.Int).Add(constants.ZnnPerByteOfStateCeiling, big.NewInt(1))))
+
+	settlementCall(t, z, setPeripheryConfigStep(g.User1.Address, ok, ok), constants.ErrPermissionDenied)
+}
+
+func TestSettlement_SetPeripheryConfig_TimeChallenge(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	bytecode, state := big.NewInt(5), big.NewInt(9)
+
+	settlementCall(t, z, setPeripheryConfigStep(g.User5.Address, bytecode, state), nil)
+	if _, err := definition.GetPeripheryConfig(settlementStorage(t, z)); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no config while pending, got err %v", err)
+	}
+	settlementCall(t, z, setPeripheryConfigStep(g.User5.Address, bytecode, state), constants.ErrTimeChallengeNotDue)
+
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setPeripheryConfigStep(g.User5.Address, bytecode, state), nil)
+	config, err := definition.GetPeripheryConfig(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if config.ZnnPerByteOfBytecode.Cmp(bytecode) != 0 || config.ZnnPerByteOfState.Cmp(state) != 0 {
+		t.Fatalf("expected the new config, got %+v", config)
+	}
+}
+
+func TestSettlement_CollectReward_NothingToWithdraw(t *testing.T) {
+	z := newSettlementZenon(t)
+	settlementCall(t, z, settlementStep(g.User1.Address, definition.SettlementCollectRewardMethodName), constants.ErrNothingToWithdraw)
+
+	// a SUBMIT-only pause does not block collection
+	settlementCall(t, z, pauseStep(g.User5.Address, 7, false, definition.PauseScopeSubmit, true), nil)
+	settlementCall(t, z, settlementStep(g.User1.Address, definition.SettlementCollectRewardMethodName), constants.ErrNothingToWithdraw)
+}
+
+func TestSettlement_CollectReward_BlockedByRelayPauseOnOneDomain(t *testing.T) {
+	z := newSettlementZenon(t)
+	settlementCall(t, z, pauseStep(g.User5.Address, 7, false, definition.PauseScopeRelay, true), nil)
+	settlementCall(t, z, settlementStep(g.User1.Address, definition.SettlementCollectRewardMethodName), constants.ErrSettlementRelayPaused)
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 7, false, definition.PauseScopeRelay, false), nil)
+	settlementCall(t, z, settlementStep(g.User1.Address, definition.SettlementCollectRewardMethodName), constants.ErrNothingToWithdraw)
+}
+
+// activateSporkByName creates and activates a spork, then registers its id
+// on target. The pillar worker returns at the first embedded contract that
+// cannot be updated, so the automatic Settlement crank only runs once the
+// sporks gating the other updatable contracts are active too.
+func activateSporkByName(t *testing.T, z mock.MockZenon, name string, target *types.ImplementedSpork) {
+	t.Helper()
+	sporkAPI := embedded.NewSporkApi(z)
+	z.InsertSendBlock(&nom.AccountBlock{
+		Address:   g.Spork.Address,
+		ToAddress: types.SporkContract,
+		Data:      definition.ABISpork.PackMethodPanic(definition.SporkCreateMethodName, name, name),
+	}, nil, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+
+	sporkList, err := sporkAPI.GetAll(0, 10)
+	common.FailIfErr(t, err)
+	var id types.Hash
+	for _, spork := range sporkList.List {
+		if spork.Name == name {
+			id = spork.Id
+		}
+	}
+	if id.IsZero() {
+		t.Fatalf("spork %s not created", name)
+	}
+	z.InsertSendBlock(&nom.AccountBlock{
+		Address:   g.Spork.Address,
+		ToAddress: types.SporkContract,
+		Data:      definition.ABISpork.PackMethodPanic(definition.SporkActivateMethodName, id),
+	}, nil, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	target.SporkId = id
+	types.ImplementedSporksMap[id] = true
+}
+
+// The pillar worker cranks Update automatically once the rate limit allows
+// it, so a manual Update sent straight after is too recent.
+func TestSettlement_Update_AutomaticCrankConsumesRateLimit(t *testing.T) {
+	z := mock.NewMockZenon(t)
+	defer z.StopPanic()
+	activateOffchainExecution(t, z)
+	activateSporkByName(t, z, "spork-accelerator", types.AcceleratorSpork)
+	activateSporkByName(t, z, "spork-bridge-liquidity", types.BridgeAndLiquiditySpork)
+
+	before, err := definition.GetLastUpdate(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if before.Height != 0 {
+		t.Fatalf("expected no update before the crank, got height %d", before.Height)
+	}
+
+	advanceMomentums(t, z, constants.UpdateMinNumMomentums+10)
+	advanceMomentums(t, z, 5)
+
+	after, err := definition.GetLastUpdate(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if after.Height == 0 {
+		t.Fatal("expected a pillar to have cranked Update")
+	}
+
+	settlementCall(t, z, settlementStep(g.User1.Address, definition.SettlementUpdateMethodName), constants.ErrUpdateTooRecent)
+}
+
+// Settlement is the last embedded contract the worker visits, so the
+// other updatable contracts must be active for the loop to reach it. With
+// the offchain-execution spork inactive the worker skips it silently.
+func TestSettlement_Update_WorkerSkipsBeforeSpork(t *testing.T) {
+	z := mock.NewMockZenon(t)
+	defer z.StopPanic()
+	saveSporkState(t)
+	logs := new(bytes.Buffer)
+	common.PillarLogger.SetHandler(log15.StreamHandler(logs, log15.LogfmtFormat()))
+	activateSporkByName(t, z, "spork-accelerator", types.AcceleratorSpork)
+	activateSporkByName(t, z, "spork-bridge-liquidity", types.BridgeAndLiquiditySpork)
+
+	advanceMomentums(t, z, constants.UpdateMinNumMomentums+10)
+
+	out := logs.String()
+	if !strings.Contains(out, "contract-address="+types.AcceleratorContract.String()) {
+		t.Fatal("expected the worker to reach the Accelerator update")
+	}
+	if strings.Contains(out, "contract-address="+types.SettlementContract.String()) {
+		t.Fatal("worker produced an Update block for Settlement before the spork")
+	}
+	if strings.Contains(out, "failed to update contracts") {
+		t.Fatal("worker failed while updating contracts before the spork")
+	}
+	last, err := definition.GetLastUpdate(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if last.Height != 0 {
+		t.Fatalf("expected no Settlement update before the spork, got height %d", last.Height)
+	}
 }
 
 func TestSettlement_RegisterDomain_CapsAndSpecChangeUsesLongerDelay(t *testing.T) {

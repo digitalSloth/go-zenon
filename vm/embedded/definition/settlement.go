@@ -17,8 +17,16 @@ import (
 const (
 	jsonSettlement = `
 	[
-		{"type":"function","name":"Update","inputs":[
+		{"type":"function","name":"Update","inputs":[]},
+		{"type":"function","name":"ReleaseWithdrawals","inputs":[
 			{"name":"domainId","type":"uint32"}]},
+		{"type":"function","name":"CollectReward","inputs":[]},
+		{"type":"function","name":"RegisterExecutor","inputs":[
+			{"name":"pillarName","type":"string"},
+			{"name":"executorAddress","type":"address"}]},
+		{"type":"function","name":"SetPeripheryConfig","inputs":[
+			{"name":"znnPerByteOfBytecode","type":"uint256"},
+			{"name":"znnPerByteOfState","type":"uint256"}]},
 
 		{"type":"function","name":"RegisterDomain","inputs":[
 			{"name":"domainId","type":"uint32"},
@@ -84,8 +92,9 @@ const (
 			{"name":"outboxRoot","type":"hash"},
 			{"name":"daHash","type":"hash"},
 			{"name":"daMode","type":"uint8"},
-			{"name":"executorIndex","type":"uint8"},
+			{"name":"executorPillar","type":"string"},
 			{"name":"submittedAtHeight","type":"uint64"},
+			{"name":"finalizeAtHeight","type":"uint64"},
 			{"name":"assetFlowSummary","type":"bytes"},
 			{"name":"proofData","type":"bytes"},
 			{"name":"state","type":"uint8"}
@@ -101,7 +110,8 @@ const (
 
 		{"type":"variable","name":"assignedIndexRecord","inputs":[
 			{"name":"assetId","type":"hash"},
-			{"name":"amount","type":"uint256"}
+			{"name":"amount","type":"uint256"},
+			{"name":"fee","type":"uint256"}
 		]},
 
 		{"type":"variable","name":"cumulativeDepositTotal","inputs":[
@@ -135,10 +145,32 @@ const (
 			{"name":"receivedChunks","type":"bytes"}
 		]},
 
-		{"type":"variable","name":"executorBond","inputs":[
-			{"name":"znnAmount","type":"uint256"},
-			{"name":"qsrAmount","type":"uint256"},
+		{"type":"variable","name":"executorSetMember","inputs":[
+			{"name":"pillarName","type":"string"},
+			{"name":"executorAddress","type":"address"},
+			{"name":"registrationHeight","type":"uint64"},
 			{"name":"status","type":"uint8"}
+		]},
+
+		{"type":"variable","name":"peripheryConfig","inputs":[
+			{"name":"znnPerByteOfBytecode","type":"uint256"},
+			{"name":"znnPerByteOfState","type":"uint256"}
+		]},
+
+		{"type":"variable","name":"pendingFee","inputs":[
+			{"name":"pillarName","type":"string"},
+			{"name":"amount","type":"uint256"}
+		]},
+
+		{"type":"variable","name":"feeEpoch","inputs":[
+			{"name":"finalityHeight","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"feeCounters","inputs":[
+			{"name":"totalFeesCollected","type":"uint256"},
+			{"name":"totalFeesBurned","type":"uint256"},
+			{"name":"totalFeesCredited","type":"uint256"},
+			{"name":"totalRewardsCollected","type":"uint256"}
 		]},
 
 		{"type":"variable","name":"domainConfig","inputs":[
@@ -193,22 +225,19 @@ const (
 		]}
 	]`
 
-	SettlementUpdateMethodName = "Update"
+	SettlementUpdateMethodName             = "Update"
+	SettlementReleaseWithdrawalsMethodName = "ReleaseWithdrawals"
+	SettlementCollectRewardMethodName      = "CollectReward"
 
+	SettlementRegisterExecutorMethodName   = "RegisterExecutor"
+	SettlementSetPeripheryConfigMethodName = "SetPeripheryConfig"
 	// declared, not yet wired
-	SettlementSetPeripheryConfigMethodName  = "SetPeripheryConfig"
 	SettlementInitiateEscapeHatchMethodName = "InitiateEscapeHatch"
 
 	SettlementRegisterDomainMethodName     = "RegisterDomain"
 	SettlementSetDomainConfigMethodName    = "SetDomainConfig"
 	SettlementSetAssetConfigMethodName     = "SetAssetConfig"
 	SettlementSetApprovedDAModesMethodName = "SetApprovedDAModes"
-	// declared for Tickets 11+, not yet wired
-	SettlementRegisterExecutorMethodName = "RegisterExecutor"
-	// declared for Tickets 11+, not yet wired
-	SettlementPostBondMethodName = "PostBond"
-	// declared for Tickets 11+, not yet wired
-	SettlementRevokeBondMethodName = "RevokeBond"
 	// declared for Tickets 11+, not yet wired
 	SettlementDepositMethodName = "Deposit"
 	// declared for Tickets 11+, not yet wired
@@ -238,7 +267,11 @@ const (
 	releaseQueueEntryVariableName         = "releaseQueueEntry"
 	releaseQueueMetaVariableName          = "releaseQueueMeta"
 	deployRecordVariableName              = "deployRecord"
-	executorBondVariableName              = "executorBond"
+	executorSetMemberVariableName         = "executorSetMember"
+	peripheryConfigVariableName           = "peripheryConfig"
+	pendingFeeVariableName                = "pendingFee"
+	feeEpochVariableName                  = "feeEpoch"
+	feeCountersVariableName               = "feeCounters"
 	domainConfigVariableName              = "domainConfig"
 	assetConfigVariableName               = "assetConfig"
 	approvedDAModeSetVariableName         = "approvedDAModeSet"
@@ -317,16 +350,19 @@ const (
 	BatchStateFinalized
 )
 
-// ExecutorBond.status
+// ExecutorSetMember.status
 const (
-	ExecutorStatusRegistered uint8 = iota
-	ExecutorStatusActive
+	ExecutorStatusActive uint8 = iota
+	// reserved
+	ExecutorStatusLapsed
+	// reserved
+	ExecutorStatusCooldown
 )
 
 // Pause scopes
 const (
 	PauseScopeSubmit uint8 = iota // halts SubmitBatch (Ticket 15)
-	PauseScopeRelay               // halts RelayMessage registration + Update release (Ticket 16)
+	PauseScopeRelay               // halts RelayMessage registration, ReleaseWithdrawals release, fee settlement and CollectReward
 )
 
 var (
@@ -334,7 +370,7 @@ var (
 
 	// Settlement contract storage key-prefix table. Storage is namespaced to
 	// SettlementContract, so prefixes only need uniqueness within this contract.
-	// The reused common accessors (GetLastUpdate, GetQsrDeposit) occupy 129/130.
+	// The reused common accessors (GetLastUpdate, RewardDeposit) occupy 129/128.
 	_                            = byte(0)      // reserve 0x00
 	domainRecordPrefix           = []byte{0x01} // DomainRecord, key: domainId (u32 BE)
 	batchEntryPrefix             = []byte{0x02} // batch entry, key: domainId ‖ batchId (u64 BE)
@@ -347,8 +383,8 @@ var (
 	releaseQueueMetaPrefix       = []byte{0x09} // key: domainId
 	deployRecordPrefix           = []byte{0x0A} // key: domainId ‖ codeHash (32B)
 	processedOutboxPrefix        = []byte{0x0B} // key: outboxId (32B)
-	executorBondPrefix           = []byte{0x0C} // key: domainId ‖ executorAddress
-	_                            = []byte{0x0D} // reserved: network-wide Periphery record
+	executorSetMemberPrefix      = []byte{0x0C} // ExecutorSetMember, key: hash(pillarName)
+	peripheryConfigKey           = []byte{0x0D} // PeripheryConfig, singleton
 	assetRegistryPrefix          = []byte{0x0E} // reserved, key: domainId ‖ assetId (32B)
 	messageStatePrefix           = []byte{0x0F} // reserved, key: outboxId (32B)
 	fraudRefereeRegistryPrefix   = []byte{0x10} // reserved, key: domainId
@@ -360,6 +396,9 @@ var (
 	assetConfigPrefix            = []byte{0x16} // AssetConfig, key: domainId ‖ assetId (32B)
 	approvedDAModeSetPrefix      = []byte{0x17} // ApprovedDAModeSet, key: domainId (u32 BE)
 	domainCounterKey             = []byte{0x18} // last assigned domainId, singleton
+	pendingFeePrefix             = []byte{0x19} // key: epoch (u64 BE) ‖ hash(pillarName)
+	feeEpochPrefix               = []byte{0x1A} // pending-epoch queue, key: epoch (u64 BE)
+	feeCountersKey               = []byte{0x1B} // FeeCounters, singleton
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -493,8 +532,9 @@ type BatchEntry struct {
 	OutboxRoot        types.Hash
 	DaHash            types.Hash
 	DaMode            uint8
-	ExecutorIndex     uint8
+	ExecutorPillar    string
 	SubmittedAtHeight uint64
+	FinalizeAtHeight  uint64
 	AssetFlowSummary  []byte
 	ProofData         []byte
 	State             uint8
@@ -514,8 +554,9 @@ func (b *BatchEntry) Save(context db.DB) error {
 		b.OutboxRoot,
 		b.DaHash,
 		b.DaMode,
-		b.ExecutorIndex,
+		b.ExecutorPillar,
 		b.SubmittedAtHeight,
+		b.FinalizeAtHeight,
 		b.AssetFlowSummary,
 		b.ProofData,
 		b.State,
@@ -652,13 +693,19 @@ type AssignedIndexRecord struct {
 	AssignedIndexRecordKey
 	AssetId types.Hash
 	Amount  *big.Int
+	Fee     *big.Int
 }
 
 func (r *AssignedIndexRecord) Save(context db.DB) error {
+	fee := r.Fee
+	if fee == nil {
+		fee = new(big.Int)
+	}
 	data, err := ABISettlement.PackVariable(
 		assignedIndexRecordVariableName,
 		r.AssetId,
 		r.Amount,
+		fee,
 	)
 	if err != nil {
 		return err
@@ -1044,78 +1091,258 @@ func IsOutboxProcessed(context db.DB, outboxId types.Hash) (bool, error) {
 }
 
 // ============================================================================
-// Executor registration + bond (per domain)
+// Executor set, periphery config, fee accounting
 // ============================================================================
 
-// The bond is keyed by (domainId, executorAddress). Registering a replacement
-// executor for a domain leaves the outgoing executor's record in place under its
-// own address, which is what lets that executor reclaim both legs once it is no
-// longer the domain's registered executor and every batch it submitted has
-// finalized. Both key fields are recovered from the key rather than stored in the
-// value, as DomainRecord and BatchEntry do.
-func getExecutorBondKey(domainId uint32, executor types.Address) []byte {
-	return common.JoinBytes(executorBondPrefix, uint32ToBytesBE(domainId), executor.Bytes())
+func getExecutorSetMemberKey(pillarName string) []byte {
+	return common.JoinBytes(executorSetMemberPrefix, types.NewHash([]byte(pillarName)).Bytes())
 }
 
-type ExecutorBond struct {
-	DomainId  uint32
-	Executor  types.Address
-	ZnnAmount *big.Int
-	QsrAmount *big.Int
-	Status    uint8
+type ExecutorSetMember struct {
+	PillarName         string
+	ExecutorAddress    types.Address
+	RegistrationHeight uint64
+	Status             uint8
 }
 
-func (b *ExecutorBond) Save(context db.DB) error {
+func (m *ExecutorSetMember) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		executorBondVariableName,
-		b.ZnnAmount,
-		b.QsrAmount,
-		b.Status,
+		executorSetMemberVariableName,
+		m.PillarName,
+		m.ExecutorAddress,
+		m.RegistrationHeight,
+		m.Status,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(getExecutorBondKey(b.DomainId, b.Executor), data)
+	return context.Put(getExecutorSetMemberKey(m.PillarName), data)
 }
-func (b *ExecutorBond) Delete(context db.DB) error {
-	return context.Delete(getExecutorBondKey(b.DomainId, b.Executor))
+func (m *ExecutorSetMember) Delete(context db.DB) error {
+	return context.Delete(getExecutorSetMemberKey(m.PillarName))
 }
 
-func isExecutorBondKey(key []byte) bool {
-	return len(key) == 1+4+types.AddressSize && key[0] == executorBondPrefix[0]
-}
-func unmarshalExecutorBondKey(key []byte) (uint32, types.Address, error) {
-	if !isExecutorBondKey(key) {
-		return 0, types.Address{}, errors.Errorf("invalid key! Not executor bond key")
+// GetExecutorSet returns every stored executor-set member.
+func GetExecutorSet(context db.DB) ([]*ExecutorSetMember, error) {
+	iterator := context.NewIterator(executorSetMemberPrefix)
+	defer iterator.Release()
+	list := make([]*ExecutorSetMember, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		member := new(ExecutorSetMember)
+		if err := ABISettlement.UnpackVariable(member, executorSetMemberVariableName, iterator.Value()); err != nil {
+			return nil, err
+		}
+		list = append(list, member)
 	}
-	executor, err := types.BytesToAddress(key[5:])
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return list, nil
+}
+
+type PeripheryConfig struct {
+	ZnnPerByteOfBytecode *big.Int
+	ZnnPerByteOfState    *big.Int
+}
+
+func (c *PeripheryConfig) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		peripheryConfigVariableName,
+		c.ZnnPerByteOfBytecode,
+		c.ZnnPerByteOfState,
+	)
 	if err != nil {
-		return 0, types.Address{}, err
+		return err
 	}
-	return bytesBEToUint32(key[1:5]), executor, nil
+	return context.Put(peripheryConfigKey, data)
 }
-func parseExecutorBond(key, data []byte) (*ExecutorBond, error) {
-	if len(data) == 0 {
+
+// GetPeripheryConfig returns ErrDataNonExistent when the config is unset.
+func GetPeripheryConfig(context db.DB) (*PeripheryConfig, error) {
+	if data, err := context.Get(peripheryConfigKey); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
 		return nil, constants.ErrDataNonExistent
+	} else {
+		config := new(PeripheryConfig)
+		if err := ABISettlement.UnpackVariable(config, peripheryConfigVariableName, data); err != nil {
+			return nil, err
+		}
+		return config, nil
 	}
-	bond := new(ExecutorBond)
-	if err := ABISettlement.UnpackVariable(bond, executorBondVariableName, data); err != nil {
-		return nil, err
-	}
-	domainId, executor, err := unmarshalExecutorBondKey(key)
-	if err != nil {
-		return nil, err
-	}
-	bond.DomainId = domainId
-	bond.Executor = executor
-	return bond, nil
 }
-func GetExecutorBond(context db.DB, domainId uint32, executor types.Address) (*ExecutorBond, error) {
-	key := getExecutorBondKey(domainId, executor)
+
+func getPendingFeeKey(epoch uint64, pillarName string) []byte {
+	return common.JoinBytes(pendingFeePrefix, uint64ToBytesBE(epoch), types.NewHash([]byte(pillarName)).Bytes())
+}
+
+type PendingFee struct {
+	Epoch      uint64
+	PillarName string
+	Amount     *big.Int
+}
+
+func (p *PendingFee) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		pendingFeeVariableName,
+		p.PillarName,
+		p.Amount,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getPendingFeeKey(p.Epoch, p.PillarName), data)
+}
+func (p *PendingFee) Delete(context db.DB) error {
+	return context.Delete(getPendingFeeKey(p.Epoch, p.PillarName))
+}
+
+func parsePendingFee(key, data []byte) (*PendingFee, error) {
+	fee := new(PendingFee)
+	if err := ABISettlement.UnpackVariable(fee, pendingFeeVariableName, data); err != nil {
+		return nil, err
+	}
+	fee.Epoch = bytesBEToUint64(key[1:9])
+	return fee, nil
+}
+
+// GetPendingFee returns a zero Amount when no record exists.
+func GetPendingFee(context db.DB, epoch uint64, pillarName string) (*PendingFee, error) {
+	key := getPendingFeeKey(epoch, pillarName)
 	if data, err := context.Get(key); err != nil {
 		return nil, err
+	} else if len(data) == 0 {
+		return &PendingFee{Epoch: epoch, PillarName: pillarName, Amount: new(big.Int)}, nil
 	} else {
-		return parseExecutorBond(key, data)
+		return parsePendingFee(key, data)
+	}
+}
+
+// GetPendingFeesForEpoch returns every pending fee record of one epoch.
+func GetPendingFeesForEpoch(context db.DB, epoch uint64) ([]*PendingFee, error) {
+	iterator := context.NewIterator(common.JoinBytes(pendingFeePrefix, uint64ToBytesBE(epoch)))
+	defer iterator.Release()
+	list := make([]*PendingFee, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		fee, err := parsePendingFee(iterator.Key(), iterator.Value())
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, fee)
+	}
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return list, nil
+}
+
+func getFeeEpochKey(epoch uint64) []byte {
+	return common.JoinBytes(feeEpochPrefix, uint64ToBytesBE(epoch))
+}
+
+type FeeEpoch struct {
+	Epoch          uint64
+	FinalityHeight uint64
+}
+
+func (e *FeeEpoch) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		feeEpochVariableName,
+		e.FinalityHeight,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getFeeEpochKey(e.Epoch), data)
+}
+func (e *FeeEpoch) Delete(context db.DB) error {
+	return context.Delete(getFeeEpochKey(e.Epoch))
+}
+
+func parseFeeEpoch(key, data []byte) (*FeeEpoch, error) {
+	epoch := new(FeeEpoch)
+	if err := ABISettlement.UnpackVariable(epoch, feeEpochVariableName, data); err != nil {
+		return nil, err
+	}
+	epoch.Epoch = bytesBEToUint64(key[1:9])
+	return epoch, nil
+}
+
+// GetFeeEpoch returns ErrDataNonExistent when the epoch is not queued.
+func GetFeeEpoch(context db.DB, epoch uint64) (*FeeEpoch, error) {
+	key := getFeeEpochKey(epoch)
+	if data, err := context.Get(key); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	} else {
+		return parseFeeEpoch(key, data)
+	}
+}
+
+// GetFeeEpochQueueHead returns the lowest queued epoch, or
+// ErrDataNonExistent when the queue is empty. Big-endian keys iterate in
+// ascending epoch order. Entries deleted inside a VM snapshot remain as
+// empty values and are skipped.
+func GetFeeEpochQueueHead(context db.DB) (*FeeEpoch, error) {
+	iterator := context.NewIterator(feeEpochPrefix)
+	defer iterator.Release()
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		return parseFeeEpoch(iterator.Key(), iterator.Value())
+	}
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return nil, constants.ErrDataNonExistent
+}
+
+type FeeCounters struct {
+	TotalFeesCollected    *big.Int
+	TotalFeesBurned       *big.Int
+	TotalFeesCredited     *big.Int
+	TotalRewardsCollected *big.Int
+}
+
+func (c *FeeCounters) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		feeCountersVariableName,
+		c.TotalFeesCollected,
+		c.TotalFeesBurned,
+		c.TotalFeesCredited,
+		c.TotalRewardsCollected,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(feeCountersKey, data)
+}
+
+// GetFeeCounters returns all-zero counters when none are stored.
+func GetFeeCounters(context db.DB) (*FeeCounters, error) {
+	if data, err := context.Get(feeCountersKey); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &FeeCounters{
+			TotalFeesCollected:    new(big.Int),
+			TotalFeesBurned:       new(big.Int),
+			TotalFeesCredited:     new(big.Int),
+			TotalRewardsCollected: new(big.Int),
+		}, nil
+	} else {
+		counters := new(FeeCounters)
+		if err := ABISettlement.UnpackVariable(counters, feeCountersVariableName, data); err != nil {
+			return nil, err
+		}
+		return counters, nil
 	}
 }
 
@@ -1347,6 +1574,33 @@ func IsRelayPaused(context db.DB, domainId uint32) (bool, error) {
 		return false, err
 	}
 	return domain.RelayPaused, nil
+}
+
+// IsRelayPausedAnywhere reports whether RELAY is paused globally or for any
+// domainId whose pause record has RelayPaused set.
+func IsRelayPausedAnywhere(context db.DB) (bool, error) {
+	global, err := GetGlobalPauseState(context)
+	if err != nil {
+		return false, err
+	}
+	if global.RelayPaused {
+		return true, nil
+	}
+	iterator := context.NewIterator(domainPauseStatePrefix)
+	defer iterator.Release()
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		state := new(PauseState)
+		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, iterator.Value()); err != nil {
+			return false, err
+		}
+		if state.RelayPaused {
+			return true, nil
+		}
+	}
+	return false, iterator.Error()
 }
 
 // ============================================================================
