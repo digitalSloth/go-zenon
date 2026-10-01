@@ -9,6 +9,7 @@ import (
 	"github.com/zenon-network/go-zenon/chain/nom"
 	"github.com/zenon-network/go-zenon/common"
 	"github.com/zenon-network/go-zenon/common/crypto"
+	"github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm/constants"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
@@ -28,17 +29,80 @@ func checkNetworkAdmin(sendBlock *nom.AccountBlock) error {
 	return nil
 }
 
-// SettlementUpdateMethod is the permissionless, rate-limited release crank. It
-// carries the domainId whose release queue it drains, so its rate limit applies
-// per domain: one domain's traffic cannot starve another domain's exits. The
-// method validates and dispatches; releasing queued withdrawals is not
-// implemented.
+// SettlementUpdateMethod is the permissionless, rate-limited crank that settles
+// the oldest queued fee epoch once it has ended and every batch in it has
+// finalized. Pillars send it automatically.
 type SettlementUpdateMethod struct{ MethodName string }
 
 func (p *SettlementUpdateMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
-	return plasmaTable.EmbeddedSimple, nil
+	return plasmaTable.EmbeddedWWithdraw, nil
 }
 func (p *SettlementUpdateMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+
+	if err := definition.ABISettlement.UnpackEmptyMethod(p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName)
+	return err
+}
+func (p *SettlementUpdateMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkAndPerformUpdate(context); err != nil {
+		return nil, err
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	activePillars, err := context.MomentumStore().GetActivePillars()
+	if err != nil {
+		return nil, err
+	}
+	burn, err := settleNextFeeEpoch(context.Storage(), frontier.Height, activePillars)
+	if err != nil {
+		return nil, err
+	}
+	return burnBlocks(burn), nil
+}
+
+// burnBlocks returns the descendant that burns the settled burn share, or
+// none when there is nothing to burn.
+func burnBlocks(burn *big.Int) []*nom.AccountBlock {
+	if burn == nil || burn.Sign() == 0 {
+		return nil
+	}
+	return []*nom.AccountBlock{
+		{
+			Address:       types.SettlementContract,
+			ToAddress:     types.TokenContract,
+			BlockType:     nom.BlockTypeContractSend,
+			Amount:        burn,
+			TokenStandard: types.ZnnTokenStandard,
+			Data:          definition.ABIToken.PackMethodPanic(definition.BurnMethodName),
+		},
+	}
+}
+
+// SettlementReleaseWithdrawalsMethod is the per-domain release crank. It carries
+// the domainId whose release queue it drains, so its rate limit applies per
+// domain: one domain's traffic cannot starve another domain's exits. The method
+// validates and dispatches; releasing queued withdrawals is not implemented.
+type SettlementReleaseWithdrawalsMethod struct{ MethodName string }
+
+func (p *SettlementReleaseWithdrawalsMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementReleaseWithdrawalsMethod) ValidateSendBlock(block *nom.AccountBlock) error {
 	var err error
 	domainId := new(uint32)
 
@@ -53,7 +117,7 @@ func (p *SettlementUpdateMethod) ValidateSendBlock(block *nom.AccountBlock) erro
 	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, *domainId)
 	return err
 }
-func (p *SettlementUpdateMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+func (p *SettlementReleaseWithdrawalsMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
 	if err := p.ValidateSendBlock(sendBlock); err != nil {
 		return nil, err
 	}
@@ -666,5 +730,397 @@ func (p *SettlementInitiateEscapeHatchMethod) ReceiveBlock(context vm_context.Ac
 		TriggeredAtHeight: momentum.Height,
 	}
 	common.DealWithErr(record.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// Executor registration, periphery config, fee settlement
+// ============================================================================
+
+// activeExecutorPillar returns the pillar name of the ACTIVE executor-set
+// member whose executor address is caller, when that pillar is in
+// activePillars; otherwise constants.ErrPermissionDenied.
+func activeExecutorPillar(storage db.DB, activePillars []*definition.PillarInfo, caller types.Address) (string, error) {
+	set, err := definition.GetExecutorSet(storage)
+	if err != nil {
+		return "", err
+	}
+	for _, member := range set {
+		if member.ExecutorAddress != caller || member.Status != definition.ExecutorStatusActive {
+			continue
+		}
+		for _, pillar := range activePillars {
+			if pillar.Name == member.PillarName {
+				return member.PillarName, nil
+			}
+		}
+	}
+	return "", constants.ErrPermissionDenied
+}
+
+func feeEpochOf(height uint64) uint64 {
+	return height / uint64(constants.MomentumsPerEpoch)
+}
+
+// accrueBatchFees adds the fees of the batch's assigned-index records to
+// the pending amount of (feeEpochOf(entry.SubmittedAtHeight),
+// entry.ExecutorPillar), and queues that epoch. inputs are the domain's
+// records in [entry.FirstInputSeq, entry.LastInputSeq], supplied by
+// SubmitBatch, so the cost is bounded by MaxBatchInputs.
+func accrueBatchFees(storage db.DB, entry *definition.BatchEntry, inputs []*definition.AssignedIndexRecord) error {
+	epoch := feeEpochOf(entry.SubmittedAtHeight)
+
+	sum := new(big.Int)
+	for _, input := range inputs {
+		if input.Fee != nil {
+			sum.Add(sum, input.Fee)
+		}
+	}
+	if sum.Sign() > 0 {
+		pending, err := definition.GetPendingFee(storage, epoch, entry.ExecutorPillar)
+		if err != nil {
+			return err
+		}
+		pending.Amount.Add(pending.Amount, sum)
+		if err := pending.Save(storage); err != nil {
+			return err
+		}
+	}
+
+	queued, err := definition.GetFeeEpoch(storage, epoch)
+	if err == constants.ErrDataNonExistent {
+		queued = &definition.FeeEpoch{Epoch: epoch, FinalityHeight: entry.FinalizeAtHeight}
+	} else if err != nil {
+		return err
+	} else if entry.FinalizeAtHeight > queued.FinalityHeight {
+		queued.FinalityHeight = entry.FinalizeAtHeight
+	}
+	return queued.Save(storage)
+}
+
+// feeGuardHolds reports whether Burned+Credited <= Collected and
+// RewardsCollected <= Credited.
+func feeGuardHolds(c *definition.FeeCounters) bool {
+	settled := new(big.Int).Add(c.TotalFeesBurned, c.TotalFeesCredited)
+	return settled.Cmp(c.TotalFeesCollected) <= 0 && c.TotalRewardsCollected.Cmp(c.TotalFeesCredited) <= 0
+}
+
+// settleNextFeeEpoch settles the head of the pending-epoch queue and
+// returns the burn total. It returns nil, having written nothing, when the
+// queue is empty, the head is not settleable, PAUSE_RELAY is in force
+// anywhere, or the guard would break.
+func settleNextFeeEpoch(storage db.DB, height uint64, activePillars []*definition.PillarInfo) (*big.Int, error) {
+	head, err := definition.GetFeeEpochQueueHead(storage)
+	if err == constants.ErrDataNonExistent {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if height < (head.Epoch+1)*uint64(constants.MomentumsPerEpoch) || height < head.FinalityHeight {
+		return nil, nil
+	}
+	paused, err := definition.IsRelayPausedAnywhere(storage)
+	if err != nil {
+		return nil, err
+	}
+	if paused {
+		return nil, nil
+	}
+
+	rewardAddress := make(map[string]types.Address, len(activePillars))
+	for _, pillar := range activePillars {
+		rewardAddress[pillar.Name] = pillar.RewardWithdrawAddress
+	}
+	pending, err := definition.GetPendingFeesForEpoch(storage, head.Epoch)
+	if err != nil {
+		return nil, err
+	}
+
+	burnTotal := new(big.Int)
+	creditTotal := new(big.Int)
+	credits := make(map[types.Address]*big.Int)
+	creditOrder := make([]types.Address, 0, len(pending))
+	for _, fee := range pending {
+		address, active := rewardAddress[fee.PillarName]
+		if !active {
+			burnTotal.Add(burnTotal, fee.Amount)
+			continue
+		}
+		burn := new(big.Int).Mul(fee.Amount, big.NewInt(constants.FeeBurnShare))
+		burn.Div(burn, big.NewInt(100))
+		credit := new(big.Int).Sub(fee.Amount, burn)
+		burnTotal.Add(burnTotal, burn)
+		creditTotal.Add(creditTotal, credit)
+		if _, seen := credits[address]; !seen {
+			credits[address] = new(big.Int)
+			creditOrder = append(creditOrder, address)
+		}
+		credits[address].Add(credits[address], credit)
+	}
+
+	counters, err := definition.GetFeeCounters(storage)
+	if err != nil {
+		return nil, err
+	}
+	counters.TotalFeesBurned = new(big.Int).Add(counters.TotalFeesBurned, burnTotal)
+	counters.TotalFeesCredited = new(big.Int).Add(counters.TotalFeesCredited, creditTotal)
+	if !feeGuardHolds(counters) {
+		return nil, nil
+	}
+
+	for _, address := range creditOrder {
+		address := address
+		deposit, err := definition.GetRewardDeposit(storage, &address)
+		if err != nil {
+			return nil, err
+		}
+		deposit.Znn.Add(deposit.Znn, credits[address])
+		if err := deposit.Save(storage); err != nil {
+			return nil, err
+		}
+	}
+	if err := counters.Save(storage); err != nil {
+		return nil, err
+	}
+	for _, fee := range pending {
+		if err := fee.Delete(storage); err != nil {
+			return nil, err
+		}
+	}
+	if err := head.Delete(storage); err != nil {
+		return nil, err
+	}
+	return burnTotal, nil
+}
+
+// collectFeeReward pays caller's ZNN RewardDeposit and returns the one
+// descendant send.
+func collectFeeReward(storage db.DB, caller types.Address) ([]*nom.AccountBlock, error) {
+	deposit, err := definition.GetRewardDeposit(storage, &caller)
+	if err != nil {
+		return nil, err
+	}
+	if deposit.Znn.Sign() == 0 {
+		return nil, constants.ErrNothingToWithdraw
+	}
+	counters, err := definition.GetFeeCounters(storage)
+	if err != nil {
+		return nil, err
+	}
+	counters.TotalRewardsCollected = new(big.Int).Add(counters.TotalRewardsCollected, deposit.Znn)
+	if !feeGuardHolds(counters) {
+		return nil, constants.ErrSettlementFeeGuard
+	}
+	if err := counters.Save(storage); err != nil {
+		return nil, err
+	}
+	if err := deposit.Delete(storage); err != nil {
+		return nil, err
+	}
+	return []*nom.AccountBlock{
+		{
+			Address:       types.SettlementContract,
+			ToAddress:     caller,
+			BlockType:     nom.BlockTypeContractSend,
+			Amount:        deposit.Znn,
+			TokenStandard: types.ZnnTokenStandard,
+			Data:          []byte{},
+		},
+	}, nil
+}
+
+// ============================================================================
+// CollectReward
+// ============================================================================
+
+type SettlementCollectRewardMethod struct{ MethodName string }
+
+func (p *SettlementCollectRewardMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedWWithdraw, nil
+}
+func (p *SettlementCollectRewardMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+
+	if err := definition.ABISettlement.UnpackEmptyMethod(p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName)
+	return err
+}
+func (p *SettlementCollectRewardMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	paused, err := definition.IsRelayPausedAnywhere(context.Storage())
+	if err != nil {
+		return nil, err
+	}
+	if paused {
+		return nil, constants.ErrSettlementRelayPaused
+	}
+	return collectFeeReward(context.Storage(), sendBlock.Address)
+}
+
+// ============================================================================
+// RegisterExecutor
+// ============================================================================
+
+type SettlementRegisterExecutorParam struct {
+	PillarName      string
+	ExecutorAddress types.Address
+}
+
+type SettlementRegisterExecutorMethod struct{ MethodName string }
+
+func (p *SettlementRegisterExecutorMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementRegisterExecutorMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementRegisterExecutorParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.PillarName, param.ExecutorAddress)
+	return err
+}
+func (p *SettlementRegisterExecutorMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkNetworkAdmin(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementRegisterExecutorParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	activePillars, err := context.MomentumStore().GetActivePillars()
+	if err != nil {
+		return nil, err
+	}
+	isActive := false
+	for _, pillar := range activePillars {
+		if pillar.Name == param.PillarName {
+			isActive = true
+			break
+		}
+	}
+	if !isActive {
+		return nil, constants.ErrForbiddenParam
+	}
+
+	paramsHash := crypto.Hash([]byte(param.PillarName), param.ExecutorAddress.Bytes())
+	timeChallengeInfo, err := TimeChallenge(context, p.MethodName, paramsHash, constants.MinAdministratorDelay)
+	if err != nil {
+		return nil, err
+	}
+	// if paramsHash is not zero it means we had a new challenge and we can't go further to save the change into local db
+	if !timeChallengeInfo.ParamsHash.IsZero() {
+		return nil, nil
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	set, err := definition.GetExecutorSet(context.Storage())
+	if err != nil {
+		return nil, err
+	}
+	for _, member := range set {
+		common.DealWithErr(member.Delete(context.Storage()))
+	}
+	member := &definition.ExecutorSetMember{
+		PillarName:         param.PillarName,
+		ExecutorAddress:    param.ExecutorAddress,
+		RegistrationHeight: frontier.Height,
+		Status:             definition.ExecutorStatusActive,
+	}
+	common.DealWithErr(member.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// SetPeripheryConfig
+// ============================================================================
+
+type SettlementPeripheryConfigParam struct {
+	ZnnPerByteOfBytecode *big.Int
+	ZnnPerByteOfState    *big.Int
+}
+
+type SettlementSetPeripheryConfigMethod struct{ MethodName string }
+
+func (p *SettlementSetPeripheryConfigMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementSetPeripheryConfigMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementPeripheryConfigParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	if !constants.IsZnnPerByteOfBytecodeInBounds(param.ZnnPerByteOfBytecode) ||
+		!constants.IsZnnPerByteOfStateInBounds(param.ZnnPerByteOfState) {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.ZnnPerByteOfBytecode, param.ZnnPerByteOfState)
+	return err
+}
+func (p *SettlementSetPeripheryConfigMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	if err := checkNetworkAdmin(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementPeripheryConfigParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	paramsHash := crypto.Hash(
+		common.BigIntToBytes(param.ZnnPerByteOfBytecode),
+		common.BigIntToBytes(param.ZnnPerByteOfState),
+	)
+	timeChallengeInfo, err := TimeChallenge(context, p.MethodName, paramsHash, constants.MinSoftDelay)
+	if err != nil {
+		return nil, err
+	}
+	// if paramsHash is not zero it means we had a new challenge and we can't go further to save the change into local db
+	if !timeChallengeInfo.ParamsHash.IsZero() {
+		return nil, nil
+	}
+
+	config := &definition.PeripheryConfig{
+		ZnnPerByteOfBytecode: param.ZnnPerByteOfBytecode,
+		ZnnPerByteOfState:    param.ZnnPerByteOfState,
+	}
+	common.DealWithErr(config.Save(context.Storage()))
 	return nil, nil
 }

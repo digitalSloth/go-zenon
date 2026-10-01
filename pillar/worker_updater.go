@@ -19,6 +19,15 @@ func canPerformEmbeddedUpdate(momentumStore store.Momentum, pool chain.AccountPo
 
 func (w *worker) updateContracts(momentumStore store.Momentum) error {
 	for _, address := range types.EmbeddedWUpdate {
+		if address == types.SettlementContract {
+			active, err := momentumStore.IsSporkActive(types.OffchainExecutionSpork)
+			if err != nil {
+				return err
+			}
+			if !active {
+				continue
+			}
+		}
 		if err := canPerformEmbeddedUpdate(momentumStore, w.chain, address); err == nil {
 			w.log.Info("producing block to update embedded-contract", "contract-address", address)
 			if block, err := w.supervisor.GenerateFromTemplate(&nom.AccountBlock{

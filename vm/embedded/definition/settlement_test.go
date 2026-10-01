@@ -138,8 +138,9 @@ func TestBatchEntry_RoundTrip(t *testing.T) {
 		OutboxRoot:        hashFromByte(0x15),
 		DaHash:            hashFromByte(0x16),
 		DaMode:            1,
-		ExecutorIndex:     0,
+		ExecutorPillar:    "pillar-a",
 		SubmittedAtHeight: 12345,
+		FinalizeAtHeight:  12400,
 		AssetFlowSummary:  []byte("asset-flow-summary-blob"),
 		ProofData:         []byte{},
 		State:             BatchStateSubmitted,
@@ -160,8 +161,8 @@ func TestBatchEntry_RoundTrip(t *testing.T) {
 		got.PostStateRoot != entry.PostStateRoot || got.InputRoot != entry.InputRoot ||
 		got.ReceiptRoot != entry.ReceiptRoot || got.EventRoot != entry.EventRoot ||
 		got.OutboxRoot != entry.OutboxRoot || got.DaHash != entry.DaHash ||
-		got.DaMode != entry.DaMode || got.ExecutorIndex != entry.ExecutorIndex ||
-		got.SubmittedAtHeight != entry.SubmittedAtHeight || got.State != entry.State {
+		got.DaMode != entry.DaMode || got.ExecutorPillar != entry.ExecutorPillar ||
+		got.SubmittedAtHeight != entry.SubmittedAtHeight || got.FinalizeAtHeight != entry.FinalizeAtHeight || got.State != entry.State {
 		t.Fatalf("field mismatch: got %+v want %+v", got, entry)
 	}
 	if string(got.AssetFlowSummary) != string(entry.AssetFlowSummary) {
@@ -364,7 +365,11 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"releaseQueueMeta":       releaseQueueMetaPrefix,
 		"deployRecord":           deployRecordPrefix,
 		"processedOutbox":        processedOutboxPrefix,
-		"executorBond":           executorBondPrefix,
+		"executorSetMember":      executorSetMemberPrefix,
+		"peripheryConfig":        peripheryConfigKey,
+		"pendingFee":             pendingFeePrefix,
+		"feeEpoch":               feeEpochPrefix,
+		"feeCounters":            feeCountersKey,
 		"assetRegistry":          assetRegistryPrefix,
 		"messageState":           messageStatePrefix,
 		"fraudRefereeRegistry":   fraudRefereeRegistryPrefix,
@@ -413,97 +418,6 @@ func TestInputSequenceCursor_RoundTrip(t *testing.T) {
 	}
 	if got.LastConsumedInputSeq != 77 {
 		t.Fatalf("cursor mismatch: got %v want 77", got.LastConsumedInputSeq)
-	}
-}
-
-func TestExecutorBond_RoundTrip(t *testing.T) {
-	memDb := db.DisableNotFound(db.NewMemDB())
-	domainId := uint32(11)
-	executor := addressFromByte(0x90)
-
-	if _, err := GetExecutorBond(memDb, domainId, executor); err != constants.ErrDataNonExistent {
-		t.Fatalf("expected ErrDataNonExistent, got %v", err)
-	}
-
-	bond := &ExecutorBond{
-		DomainId:  domainId,
-		Executor:  executor,
-		ZnnAmount: big.NewInt(1000),
-		QsrAmount: big.NewInt(2000),
-		Status:    ExecutorStatusActive,
-	}
-	if err := bond.Save(memDb); err != nil {
-		t.Fatal(err)
-	}
-	got, err := GetExecutorBond(memDb, domainId, executor)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.DomainId != domainId || got.Executor != bond.Executor ||
-		got.ZnnAmount.Cmp(bond.ZnnAmount) != 0 ||
-		got.QsrAmount.Cmp(bond.QsrAmount) != 0 || got.Status != bond.Status {
-		t.Fatalf("executor bond mismatch: got %+v want %+v", got, bond)
-	}
-
-	if err := bond.Delete(memDb); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := GetExecutorBond(memDb, domainId, executor); err != constants.ErrDataNonExistent {
-		t.Fatalf("expected ErrDataNonExistent after delete, got %v", err)
-	}
-}
-
-// Registering a replacement executor leaves the outgoing executor's bond record
-// readable under its own address, which is what RevokeBond needs to return that
-// executor's legs.
-func TestExecutorBond_ReplacementDoesNotStrandOutgoingBond(t *testing.T) {
-	memDb := db.DisableNotFound(db.NewMemDB())
-	domainId := uint32(11)
-	outgoing := addressFromByte(0x90)
-	incoming := addressFromByte(0x91)
-
-	outgoingBond := &ExecutorBond{
-		DomainId:  domainId,
-		Executor:  outgoing,
-		ZnnAmount: big.NewInt(1000),
-		QsrAmount: big.NewInt(2000),
-		Status:    ExecutorStatusActive,
-	}
-	if err := outgoingBond.Save(memDb); err != nil {
-		t.Fatal(err)
-	}
-
-	incomingBond := &ExecutorBond{
-		DomainId:  domainId,
-		Executor:  incoming,
-		ZnnAmount: big.NewInt(3000),
-		QsrAmount: big.NewInt(4000),
-		Status:    ExecutorStatusRegistered,
-	}
-	if err := incomingBond.Save(memDb); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := GetExecutorBond(memDb, domainId, outgoing)
-	if err != nil {
-		t.Fatalf("outgoing bond stranded by the replacement: %v", err)
-	}
-	if got.Executor != outgoing || got.ZnnAmount.Cmp(big.NewInt(1000)) != 0 ||
-		got.QsrAmount.Cmp(big.NewInt(2000)) != 0 || got.Status != ExecutorStatusActive {
-		t.Fatalf("outgoing bond overwritten: got %+v", got)
-	}
-
-	got, err = GetExecutorBond(memDb, domainId, incoming)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Executor != incoming || got.ZnnAmount.Cmp(big.NewInt(3000)) != 0 {
-		t.Fatalf("incoming bond mismatch: got %+v", got)
-	}
-
-	// The same executor address under a different domain is a different record.
-	if _, err := GetExecutorBond(memDb, domainId+1, outgoing); err != constants.ErrDataNonExistent {
-		t.Fatalf("expected per-domain isolation, got %v", err)
 	}
 }
 
@@ -791,5 +705,342 @@ func TestProcessedOutbox_Membership(t *testing.T) {
 	}
 	if !processed {
 		t.Fatal("expected outbox to be processed after it is set")
+	}
+}
+
+func TestAssignedIndexRecord_Fee_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	withFee := &AssignedIndexRecord{
+		AssignedIndexRecordKey: AssignedIndexRecordKey{DomainId: 1, GlobalInputIndex: 7},
+		AssetId:                hashFromByte(0x31),
+		Amount:                 big.NewInt(10),
+		Fee:                    big.NewInt(1234),
+	}
+	if err := withFee.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetAssignedIndexRecord(memDb, 1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fee.Cmp(big.NewInt(1234)) != 0 {
+		t.Fatalf("fee mismatch: got %v want 1234", got.Fee)
+	}
+
+	nilFee := &AssignedIndexRecord{
+		AssignedIndexRecordKey: AssignedIndexRecordKey{DomainId: 1, GlobalInputIndex: 8},
+		AssetId:                hashFromByte(0x31),
+		Amount:                 big.NewInt(10),
+	}
+	if err := nilFee.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err = GetAssignedIndexRecord(memDb, 1, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fee == nil || got.Fee.Sign() != 0 {
+		t.Fatalf("expected zero fee for a nil Fee, got %v", got.Fee)
+	}
+}
+
+func TestExecutorSet_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	set, err := GetExecutorSet(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set) != 0 {
+		t.Fatalf("expected empty set, got %d", len(set))
+	}
+
+	a := &ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: addressFromByte(0x01), RegistrationHeight: 10, Status: ExecutorStatusActive}
+	b := &ExecutorSetMember{PillarName: "pillar-b", ExecutorAddress: addressFromByte(0x02), RegistrationHeight: 11, Status: ExecutorStatusLapsed}
+	if err := a.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	set, err = GetExecutorSet(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(set))
+	}
+	byName := map[string]*ExecutorSetMember{}
+	for _, m := range set {
+		byName[m.PillarName] = m
+	}
+	for _, want := range []*ExecutorSetMember{a, b} {
+		got := byName[want.PillarName]
+		if got == nil || *got != *want {
+			t.Fatalf("member mismatch: got %+v want %+v", got, want)
+		}
+	}
+
+	if err := a.Delete(memDb); err != nil {
+		t.Fatal(err)
+	}
+	set, err = GetExecutorSet(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set) != 1 || set[0].PillarName != "pillar-b" {
+		t.Fatalf("expected only pillar-b after delete, got %+v", set)
+	}
+}
+
+func TestExecutorSet_SkipsEmptyValues(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	a := &ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: addressFromByte(0x01), Status: ExecutorStatusActive}
+	if err := a.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if err := memDb.Put(getExecutorSetMemberKey("pillar-tombstone"), []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	set, err := GetExecutorSet(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set) != 1 || set[0].PillarName != "pillar-a" {
+		t.Fatalf("expected the tombstone to be skipped, got %+v", set)
+	}
+}
+
+func TestPeripheryConfig_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	if _, err := GetPeripheryConfig(memDb); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent, got %v", err)
+	}
+	config := &PeripheryConfig{ZnnPerByteOfBytecode: big.NewInt(5), ZnnPerByteOfState: big.NewInt(9)}
+	if err := config.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetPeripheryConfig(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ZnnPerByteOfBytecode.Cmp(big.NewInt(5)) != 0 || got.ZnnPerByteOfState.Cmp(big.NewInt(9)) != 0 {
+		t.Fatalf("config mismatch: %+v", got)
+	}
+}
+
+func TestPendingFee_RoundTrip_EpochIsolation(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	absent, err := GetPendingFee(memDb, 4, "pillar-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absent.Amount.Sign() != 0 || absent.Epoch != 4 || absent.PillarName != "pillar-a" {
+		t.Fatalf("expected zero default, got %+v", absent)
+	}
+
+	for _, p := range []*PendingFee{
+		{Epoch: 4, PillarName: "pillar-a", Amount: big.NewInt(100)},
+		{Epoch: 4, PillarName: "pillar-b", Amount: big.NewInt(200)},
+		{Epoch: 5, PillarName: "pillar-a", Amount: big.NewInt(300)},
+	} {
+		if err := p.Save(memDb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := GetPendingFee(memDb, 4, "pillar-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Amount.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("amount mismatch: got %v want 100", got.Amount)
+	}
+
+	list, err := GetPendingFeesForEpoch(memDb, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected 2 records for epoch 4, got %d", len(list))
+	}
+	total := new(big.Int)
+	for _, p := range list {
+		if p.Epoch != 4 {
+			t.Fatalf("epoch 4 listing returned epoch %d", p.Epoch)
+		}
+		total.Add(total, p.Amount)
+	}
+	if total.Cmp(big.NewInt(300)) != 0 {
+		t.Fatalf("expected epoch 4 total 300, got %v", total)
+	}
+
+	if err := list[0].Delete(memDb); err != nil {
+		t.Fatal(err)
+	}
+	list, err = GetPendingFeesForEpoch(memDb, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 record after delete, got %d", len(list))
+	}
+}
+
+func TestFeeEpochQueue_HeadAndRoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	if _, err := GetFeeEpochQueueHead(memDb); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent on empty queue, got %v", err)
+	}
+	if _, err := GetFeeEpoch(memDb, 9); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent, got %v", err)
+	}
+
+	for _, e := range []*FeeEpoch{
+		{Epoch: 300, FinalityHeight: 1},
+		{Epoch: 2, FinalityHeight: 22},
+		{Epoch: 70000, FinalityHeight: 3},
+	} {
+		if err := e.Save(memDb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head, err := GetFeeEpochQueueHead(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Epoch != 2 || head.FinalityHeight != 22 {
+		t.Fatalf("expected head epoch 2 / finality 22, got %+v", head)
+	}
+	if err := head.Delete(memDb); err != nil {
+		t.Fatal(err)
+	}
+	head, err = GetFeeEpochQueueHead(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Epoch != 300 {
+		t.Fatalf("expected head epoch 300 after delete, got %d", head.Epoch)
+	}
+}
+
+func TestFeeEpochQueue_HeadSkipsEmptyValues(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	if err := memDb.Put(getFeeEpochKey(1), []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetFeeEpochQueueHead(memDb); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent with only a tombstone, got %v", err)
+	}
+	if _, err := GetFeeEpoch(memDb, 1); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent for a tombstoned epoch, got %v", err)
+	}
+	if err := (&FeeEpoch{Epoch: 2, FinalityHeight: 5}).Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	head, err := GetFeeEpochQueueHead(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Epoch != 2 {
+		t.Fatalf("expected head epoch 2 past the tombstone, got %d", head.Epoch)
+	}
+}
+
+func TestPendingFees_SkipsEmptyValues(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	if err := memDb.Put(getPendingFeeKey(3, "pillar-gone"), []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&PendingFee{Epoch: 3, PillarName: "pillar-a", Amount: big.NewInt(1)}).Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	list, err := GetPendingFeesForEpoch(memDb, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].PillarName != "pillar-a" {
+		t.Fatalf("expected the tombstone to be skipped, got %+v", list)
+	}
+}
+
+func TestFeeCounters_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	zero, err := GetFeeCounters(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero.TotalFeesCollected.Sign() != 0 || zero.TotalFeesBurned.Sign() != 0 ||
+		zero.TotalFeesCredited.Sign() != 0 || zero.TotalRewardsCollected.Sign() != 0 {
+		t.Fatalf("expected zero counters, got %+v", zero)
+	}
+	counters := &FeeCounters{
+		TotalFeesCollected:    big.NewInt(1),
+		TotalFeesBurned:       big.NewInt(2),
+		TotalFeesCredited:     big.NewInt(3),
+		TotalRewardsCollected: big.NewInt(4),
+	}
+	if err := counters.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetFeeCounters(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TotalFeesCollected.Int64() != 1 || got.TotalFeesBurned.Int64() != 2 ||
+		got.TotalFeesCredited.Int64() != 3 || got.TotalRewardsCollected.Int64() != 4 {
+		t.Fatalf("counters mismatch: %+v", got)
+	}
+}
+
+func TestIsRelayPausedAnywhere(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	expect := func(want bool, label string) {
+		t.Helper()
+		got, err := IsRelayPausedAnywhere(memDb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s: got %v want %v", label, got, want)
+		}
+	}
+
+	expect(false, "no records")
+
+	if err := (&PauseState{SubmitPaused: true}).SaveDomain(memDb, 3); err != nil {
+		t.Fatal(err)
+	}
+	expect(false, "domain with only SubmitPaused")
+
+	if err := (&PauseState{RelayPaused: true}).SaveDomain(memDb, 4); err != nil {
+		t.Fatal(err)
+	}
+	expect(true, "domain RELAY paused")
+
+	if err := (&PauseState{}).SaveDomain(memDb, 4); err != nil {
+		t.Fatal(err)
+	}
+	expect(false, "domain unpaused after a pause")
+
+	if err := (&PauseState{RelayPaused: true}).SaveGlobal(memDb); err != nil {
+		t.Fatal(err)
+	}
+	expect(true, "global RELAY paused")
+}
+
+func TestIsRelayPausedAnywhere_SkipsEmptyDomainValue(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	if err := memDb.Put(getDomainPauseStateKey(5), []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := IsRelayPausedAnywhere(memDb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got {
+		t.Fatal("expected an empty domain pause value to be ignored")
 	}
 }

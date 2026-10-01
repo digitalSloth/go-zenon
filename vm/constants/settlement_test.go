@@ -102,3 +102,38 @@ func TestIsInputGasInBounds(t *testing.T) {
 		t.Fatalf("MaxBatchInputs * MaxInputGas overflows uint64")
 	}
 }
+
+func TestFeeBurnShare(t *testing.T) {
+	if FeeBurnShare != 30 {
+		t.Fatalf("expected FeeBurnShare 30, got %d", FeeBurnShare)
+	}
+}
+
+func TestIsZnnPerByteInBounds(t *testing.T) {
+	cases := []struct {
+		name    string
+		check   func(*big.Int) bool
+		floor   *big.Int
+		ceiling *big.Int
+	}{
+		{"bytecode", IsZnnPerByteOfBytecodeInBounds, ZnnPerByteOfBytecodeFloor, ZnnPerByteOfBytecodeCeiling},
+		{"state", IsZnnPerByteOfStateInBounds, ZnnPerByteOfStateFloor, ZnnPerByteOfStateCeiling},
+	}
+	for _, c := range cases {
+		if !c.check(c.floor) {
+			t.Fatalf("%s: expected floor to be in bounds", c.name)
+		}
+		if !c.check(c.ceiling) {
+			t.Fatalf("%s: expected ceiling to be in bounds", c.name)
+		}
+		if c.check(new(big.Int).Sub(c.floor, big.NewInt(1))) {
+			t.Fatalf("%s: expected below floor to be rejected", c.name)
+		}
+		if c.check(new(big.Int).Add(c.ceiling, big.NewInt(1))) {
+			t.Fatalf("%s: expected above ceiling to be rejected", c.name)
+		}
+		if c.check(nil) {
+			t.Fatalf("%s: expected nil to be rejected", c.name)
+		}
+	}
+}
