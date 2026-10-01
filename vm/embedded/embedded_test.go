@@ -117,7 +117,10 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"WithdrawQsr", "id":"b3d658fd", "signature":"WithdrawQsr()"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"InitiateEscapeHatch", "id":"fed58790", "signature":"InitiateEscapeHatch(uint32)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Pause", "id":"ce23af21", "signature":"Pause(uint32,bool,uint8,bool)"}
-{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetPeripheryConfig", "id":"6aef5a8e", "signature":"SetPeripheryConfig(uint64,uint256,uint64)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"RegisterDomain", "id":"4e3b2f97", "signature":"RegisterDomain(uint32,uint8,uint8,hash,uint8,uint8,uint8,bytes,bytes,uint8,uint8,bytes,uint8,uint8,uint64,uint64)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetApprovedDAModes", "id":"4c927fe6", "signature":"SetApprovedDAModes(uint32,bytes)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetAssetConfig", "id":"d0a6b72a", "signature":"SetAssetConfig(uint32,hash,uint256)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetDomainConfig", "id":"17cb5597", "signature":"SetDomainConfig(uint32,uint64,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Update", "id":"97bb4724", "signature":"Update(uint32)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"ActivateSpork", "id":"25c54e96", "signature":"ActivateSpork(hash)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"CreateSpork", "id":"b602e311", "signature":"CreateSpork(string,string)"}

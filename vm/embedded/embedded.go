@@ -73,7 +73,10 @@ func applySettlementDiffs(contracts map[types.Address]*embeddedImplementation) {
 	contracts[types.SettlementContract] = &embeddedImplementation{
 		map[string]Method{
 			cabi.SettlementUpdateMethodName:              &implementation.SettlementUpdateMethod{MethodName: cabi.SettlementUpdateMethodName},
-			cabi.SettlementSetPeripheryConfigMethodName:  &implementation.SettlementSetPeripheryConfigMethod{MethodName: cabi.SettlementSetPeripheryConfigMethodName},
+			cabi.SettlementRegisterDomainMethodName:      &implementation.SettlementRegisterDomainMethod{MethodName: cabi.SettlementRegisterDomainMethodName},
+			cabi.SettlementSetDomainConfigMethodName:     &implementation.SettlementSetDomainConfigMethod{MethodName: cabi.SettlementSetDomainConfigMethodName},
+			cabi.SettlementSetAssetConfigMethodName:      &implementation.SettlementSetAssetConfigMethod{MethodName: cabi.SettlementSetAssetConfigMethodName},
+			cabi.SettlementSetApprovedDAModesMethodName:  &implementation.SettlementSetApprovedDAModesMethod{MethodName: cabi.SettlementSetApprovedDAModesMethodName},
 			cabi.SettlementPauseMethodName:               &implementation.SettlementPauseMethod{MethodName: cabi.SettlementPauseMethodName},
 			cabi.SettlementInitiateEscapeHatchMethodName: &implementation.SettlementInitiateEscapeHatchMethod{MethodName: cabi.SettlementInitiateEscapeHatchMethodName},
 		},

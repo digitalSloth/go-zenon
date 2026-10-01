@@ -36,7 +36,7 @@ var (
 	// Floor per MomentumsPerEpoch; ceiling is a pre-mainnet placeholder (~14 days).
 	WithdrawalDelayMin = uint64(MomentumsPerEpoch)
 	// pre-mainnet; finalize before mainnet
-	WithdrawalDelayMax = uint64(MomentumsPerEpoch * 24 * 14)
+	WithdrawalDelayMax = uint64(MomentumsPerEpoch * 14)
 
 	// MaxBatchWithdrawal floor/ceiling per (domain, asset).
 	// Non-zero floor; ceiling is a pre-mainnet placeholder that also sizes the bond.
@@ -78,9 +78,10 @@ func IsMaxBatchWithdrawalInBounds(v *big.Int) bool {
 
 // IsRuntimeUpgradeDelayValid reports whether a runtime-upgrade (stfSpecHash
 // bump) delay satisfies the mandatory floor relative to the domain's active
-// withdrawal delay.
+// withdrawal delay and stays within WithdrawalDelayMax, which keeps the
+// time-challenge due-height sum from wrapping uint64.
 func IsRuntimeUpgradeDelayValid(upgradeDelay, activeWithdrawalDelay uint64) bool {
-	return upgradeDelay >= activeWithdrawalDelay
+	return upgradeDelay >= activeWithdrawalDelay && upgradeDelay <= WithdrawalDelayMax
 }
 
 // IsInputGasInBounds reports whether a CallL2 or Deposit plasma_limit is within
