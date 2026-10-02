@@ -1044,3 +1044,26 @@ func TestIsRelayPausedAnywhere_SkipsEmptyDomainValue(t *testing.T) {
 		t.Fatal("expected an empty domain pause value to be ignored")
 	}
 }
+
+func TestAssetId_CanonicalMapping(t *testing.T) {
+	id := AssetIdFromZTS(types.ZnnTokenStandard)
+	if id.String() != "0000000000000000000000000000000000000000000014e66318c6318c6318c6" {
+		t.Fatalf("unexpected asset id %s", id.String())
+	}
+	zts, err := ZTSFromAssetId(id)
+	if err != nil || zts != types.ZnnTokenStandard {
+		t.Fatalf("expected ZNN, got %v, %v", zts, err)
+	}
+}
+
+func TestAssetId_RejectsNonCanonical(t *testing.T) {
+	for _, hexId := range []string{
+		"0100000000000000000000000000000000000000000014e66318c6318c6318c6",
+		"14e66318c6318c6318c600000000000000000000000000000000000000000000",
+	} {
+		id := types.HexToHashPanic(hexId)
+		if _, err := ZTSFromAssetId(id); err != constants.ErrForbiddenParam {
+			t.Fatalf("expected ErrForbiddenParam for %s, got %v", hexId, err)
+		}
+	}
+}
