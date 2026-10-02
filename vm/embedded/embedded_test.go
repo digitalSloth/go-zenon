@@ -116,6 +116,7 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"WithdrawQsr", "id":"b3d658fd", "signature":"WithdrawQsr()"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"CollectReward", "id":"af43d3f0", "signature":"CollectReward()"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Deposit", "id":"967793fa", "signature":"Deposit(uint32,hash,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"InitiateEscapeHatch", "id":"fed58790", "signature":"InitiateEscapeHatch(uint32)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Pause", "id":"ce23af21", "signature":"Pause(uint32,bool,uint8,bool)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"RegisterDomain", "id":"4e3b2f97", "signature":"RegisterDomain(uint32,uint8,uint8,hash,uint8,uint8,uint8,bytes,bytes,uint8,uint8,bytes,uint8,uint8,uint64,uint64)"}
