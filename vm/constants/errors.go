@@ -115,4 +115,8 @@ var (
 	ErrNotImplemented        = errors.New("not implemented")
 	ErrSettlementRelayPaused = errors.New("settlement relay paused")
 	ErrSettlementFeeGuard    = errors.New("settlement fee guard violated")
+
+	ErrSettlementConservationViolated = errors.New("settlement conservation invariant violated")
+	ErrSettlementInvalidAssetFlow     = errors.New("settlement asset flow summary invalid")
+	ErrSettlementInputIndexExhausted  = errors.New("settlement input index exhausted")
 )

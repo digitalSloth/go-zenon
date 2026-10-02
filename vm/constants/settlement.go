@@ -85,6 +85,16 @@ func IsMaxBatchWithdrawalInBounds(v *big.Int) bool {
 	return v.Cmp(MaxBatchWithdrawalFloor) >= 0 && v.Cmp(MaxBatchWithdrawalCeiling) <= 0
 }
 
+// IsMaxBatchMintInBounds reports whether a MaxBatchMint value is within the
+// enforced hard bounds. Reserved for MINTED custody; nothing calls it while
+// ESCROW is the only custody mode.
+func IsMaxBatchMintInBounds(v *big.Int) bool {
+	if v == nil {
+		return false
+	}
+	return v.Cmp(MaxBatchMintFloor) >= 0 && v.Cmp(MaxBatchMintCeiling) <= 0
+}
+
 // IsRuntimeUpgradeDelayValid reports whether a runtime-upgrade (stfSpecHash
 // bump) delay satisfies the mandatory floor relative to the domain's active
 // withdrawal delay and stays within WithdrawalDelayMax, which keeps the

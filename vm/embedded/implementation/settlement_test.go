@@ -2,6 +2,8 @@ package implementation
 
 import (
 	"bytes"
+	"encoding/hex"
+	"math"
 	"math/big"
 	"testing"
 
@@ -515,5 +517,193 @@ func TestBurnBlocks(t *testing.T) {
 	expectBig(t, "amount", b.Amount, 30)
 	if !bytes.Equal(b.Data, definition.ABIToken.PackMethodPanic(definition.BurnMethodName)) {
 		t.Fatal("expected the Burn call data")
+	}
+}
+
+func znnAssetId() types.Hash { return definition.AssetIdFromZTS(types.ZnnTokenStandard) }
+func qsrAssetId() types.Hash { return definition.AssetIdFromZTS(types.QsrTokenStandard) }
+
+func TestAdmitInput_AssignsConsecutiveIndices(t *testing.T) {
+	storage := feeTestStorage()
+	znn, qsr := znnAssetId(), qsrAssetId()
+
+	common.FailIfErr(t, admitInput(storage, 1, znn, big.NewInt(5), nil))
+	common.FailIfErr(t, admitInput(storage, 1, types.ZeroHash, nil, big.NewInt(2)))
+	common.FailIfErr(t, admitInput(storage, 2, qsr, big.NewInt(7), nil))
+	common.FailIfErr(t, admitInput(storage, 1, znn, big.NewInt(3), nil))
+
+	want := []struct {
+		domain uint32
+		index  uint64
+		amount int64
+	}{{1, 0, 5}, {1, 1, 0}, {2, 2, 7}, {1, 3, 3}}
+	for _, w := range want {
+		record, err := definition.GetAssignedIndexRecord(storage, w.domain, w.index)
+		common.FailIfErr(t, err)
+		if record.Amount.Cmp(big.NewInt(w.amount)) != 0 {
+			t.Fatalf("index %d: expected amount %d, got %v", w.index, w.amount, record.Amount)
+		}
+	}
+	if _, err := definition.GetAssignedIndexRecord(storage, 2, 0); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no record for domain 2 index 0, got %v", err)
+	}
+
+	counter, err := definition.GetReceivedInputCounter(storage)
+	common.FailIfErr(t, err)
+	if counter.Count != 4 {
+		t.Fatalf("expected counter 4, got %d", counter.Count)
+	}
+	for _, c := range []struct {
+		domain uint32
+		asset  types.Hash
+		total  int64
+	}{{1, znn, 8}, {2, qsr, 7}} {
+		total, err := definition.GetCumulativeDepositTotal(storage, c.domain, c.asset)
+		common.FailIfErr(t, err)
+		if total.CumulativeDeposited.Cmp(big.NewInt(c.total)) != 0 {
+			t.Fatalf("domain %d: expected cumulative %d, got %v", c.domain, c.total, total.CumulativeDeposited)
+		}
+	}
+}
+
+func TestAdmitInput_RejectsExhaustedCounter(t *testing.T) {
+	storage := feeTestStorage()
+	common.FailIfErr(t, (&definition.ReceivedInputCounter{Count: math.MaxUint64}).Save(storage))
+
+	if err := admitInput(storage, 1, znnAssetId(), big.NewInt(5), nil); err != constants.ErrSettlementInputIndexExhausted {
+		t.Fatalf("expected ErrSettlementInputIndexExhausted, got %v", err)
+	}
+	if _, err := definition.GetAssignedIndexRecord(storage, 1, math.MaxUint64); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no record, got %v", err)
+	}
+	total, err := definition.GetCumulativeDepositTotal(storage, 1, znnAssetId())
+	common.FailIfErr(t, err)
+	if total.CumulativeDeposited.Sign() != 0 {
+		t.Fatalf("expected no cumulative total, got %v", total.CumulativeDeposited)
+	}
+}
+
+func TestSaveCustodyCounters_Invariant(t *testing.T) {
+	storage := feeTestStorage()
+	asset := znnAssetId()
+	counters := func(deposited, reserve, released int64) *definition.ConservationCounters {
+		return &definition.ConservationCounters{
+			DomainId:                 1,
+			AssetId:                  asset,
+			TotalDeposited:           big.NewInt(deposited),
+			PendingWithdrawalReserve: big.NewInt(reserve),
+			TotalReleased:            big.NewInt(released),
+		}
+	}
+
+	common.FailIfErr(t, saveCustodyCounters(storage, counters(100, 100, 0)))
+
+	for _, c := range []*definition.ConservationCounters{
+		counters(100, 101, 0),
+		counters(100, 0, 101),
+		counters(100, 41, 60),
+	} {
+		if err := saveCustodyCounters(storage, c); err != constants.ErrSettlementConservationViolated {
+			t.Fatalf("expected ErrSettlementConservationViolated, got %v", err)
+		}
+		stored, err := definition.GetConservationCounters(storage, 1, asset)
+		common.FailIfErr(t, err)
+		if stored.PendingWithdrawalReserve.Cmp(big.NewInt(100)) != 0 || stored.TotalReleased.Sign() != 0 {
+			t.Fatalf("expected stored counters unchanged, got %+v", stored)
+		}
+	}
+}
+
+const conformanceAssetFlowHex = "000000020000000000000000000000000000000000000000000004066318c6318c6318c6" +
+	"000000000000000000000000000000000000000000000000000000000000000a" +
+	"0000000000000000000000000000000000000000000000000000000000000001" +
+	"0000000000000000000000000000000000000000000014e66318c6318c6318c6" +
+	"0000000000000000000000000000000000000000000000000000000000000000" +
+	"0000000000000000000000000000000000000000000000000000000000000002"
+
+var conformanceAsset = types.HexToHashPanic("0000000000000000000000000000000000000000000004066318c6318c6318c6")
+
+func flowEntry(asset types.Hash, credit, debit int64) []byte {
+	out := append([]byte{}, asset[:]...)
+	for _, v := range []int64{credit, debit} {
+		var word [32]byte
+		new(big.Int).SetInt64(v).FillBytes(word[:])
+		out = append(out, word[:]...)
+	}
+	return out
+}
+
+func flowSummary(entries ...[]byte) []byte {
+	out := []byte{0, 0, 0, byte(len(entries))}
+	for _, e := range entries {
+		out = append(out, e...)
+	}
+	return out
+}
+
+func depositRecords(t *testing.T, amounts map[types.Hash][]int64) []*definition.AssignedIndexRecord {
+	t.Helper()
+	var records []*definition.AssignedIndexRecord
+	for asset, list := range amounts {
+		for _, a := range list {
+			records = append(records, &definition.AssignedIndexRecord{AssetId: asset, Amount: big.NewInt(a)})
+		}
+	}
+	return records
+}
+
+func TestVerifyAssetFlowDeposits_AcceptsConformanceSummary(t *testing.T) {
+	summary, err := hex.DecodeString(conformanceAssetFlowHex)
+	common.FailIfErr(t, err)
+	if len(summary) != 196 {
+		t.Fatalf("expected 196 bytes, got %d", len(summary))
+	}
+	records := depositRecords(t, map[types.Hash][]int64{conformanceAsset: {4, 6}, types.ZeroHash: {0}})
+	common.FailIfErr(t, verifyAssetFlowDeposits(summary, records))
+}
+
+func TestVerifyAssetFlowDeposits_EmptySummary(t *testing.T) {
+	common.FailIfErr(t, verifyAssetFlowDeposits([]byte{0, 0, 0, 0}, []*definition.AssignedIndexRecord{
+		{AssetId: types.ZeroHash, Amount: big.NewInt(0)},
+	}))
+}
+
+func TestVerifyAssetFlowDeposits_Rejects(t *testing.T) {
+	znn, qsr := znnAssetId(), qsrAssetId()
+	tenQsr := depositRecords(t, map[types.Hash][]int64{qsr: {10}})
+	znnAndQsr := depositRecords(t, map[types.Hash][]int64{qsr: {10}, znn: {2}})
+
+	many := []byte{0, 0, 0, 17}
+	for i := 0; i < 17; i++ {
+		var asset types.Hash
+		copy(asset[22:], []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, byte(i + 1)})
+		many = append(many, flowEntry(asset, 1, 0)...)
+	}
+	var nonCanonical types.Hash
+	nonCanonical[0] = 1
+	copy(nonCanonical[22:], types.ZnnTokenStandard.Bytes())
+
+	valid := flowSummary(flowEntry(qsr, 10, 0))
+	cases := []struct {
+		name    string
+		summary []byte
+		records []*definition.AssignedIndexRecord
+	}{
+		{"credit below deposits", flowSummary(flowEntry(qsr, 9, 0)), tenQsr},
+		{"deposit absent from summary", flowSummary(flowEntry(qsr, 10, 0)), znnAndQsr},
+		{"credit without deposit", flowSummary(flowEntry(qsr, 10, 0), flowEntry(znn, 1, 0)), tenQsr},
+		{"entries out of order", flowSummary(flowEntry(znn, 2, 0), flowEntry(qsr, 10, 0)), znnAndQsr},
+		{"duplicate asset", flowSummary(flowEntry(qsr, 10, 0), flowEntry(qsr, 10, 0)), tenQsr},
+		{"too many entries", many, nil},
+		{"entry with both amounts zero", flowSummary(flowEntry(qsr, 0, 0)), nil},
+		{"non-canonical asset id", flowSummary(flowEntry(nonCanonical, 1, 0)), nil},
+		{"trailing byte", append(append([]byte{}, valid...), 0), tenQsr},
+		{"truncated entry", valid[:len(valid)-1], tenQsr},
+		{"shorter than the count", []byte{0, 0}, nil},
+	}
+	for _, c := range cases {
+		if err := verifyAssetFlowDeposits(c.summary, c.records); err != constants.ErrSettlementInvalidAssetFlow {
+			t.Fatalf("%s: expected ErrSettlementInvalidAssetFlow, got %v", c.name, err)
+		}
 	}
 }

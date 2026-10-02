@@ -83,6 +83,7 @@ func applySettlementDiffs(contracts map[types.Address]*embeddedImplementation) {
 			cabi.SettlementSetApprovedDAModesMethodName:  &implementation.SettlementSetApprovedDAModesMethod{MethodName: cabi.SettlementSetApprovedDAModesMethodName},
 			cabi.SettlementPauseMethodName:               &implementation.SettlementPauseMethod{MethodName: cabi.SettlementPauseMethodName},
 			cabi.SettlementInitiateEscapeHatchMethodName: &implementation.SettlementInitiateEscapeHatchMethod{MethodName: cabi.SettlementInitiateEscapeHatchMethodName},
+			cabi.SettlementDepositMethodName:             &implementation.SettlementDepositMethod{MethodName: cabi.SettlementDepositMethodName},
 		},
 		cabi.ABISettlement,
 	}
