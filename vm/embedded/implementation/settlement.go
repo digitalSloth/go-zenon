@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/zenon-network/go-zenon/chain/nom"
@@ -462,11 +463,8 @@ func (p *SettlementSetAssetConfigMethod) ValidateSendBlock(block *nom.AccountBlo
 		return constants.ErrInvalidTokenOrAmount
 	}
 
-	// the canonical asset id carries the ZTS in bytes [22:32]
-	for _, b := range param.AssetId[0:22] {
-		if b != 0 {
-			return constants.ErrForbiddenParam
-		}
+	if _, err := definition.ZTSFromAssetId(param.AssetId); err != nil {
+		return constants.ErrForbiddenParam
 	}
 	if !constants.IsMaxBatchWithdrawalInBounds(param.MaxBatchWithdrawal) {
 		return constants.ErrForbiddenParam
@@ -1122,5 +1120,239 @@ func (p *SettlementSetPeripheryConfigMethod) ReceiveBlock(context vm_context.Acc
 		ZnnPerByteOfState:    param.ZnnPerByteOfState,
 	}
 	common.DealWithErr(config.Save(context.Storage()))
+	return nil, nil
+}
+
+// ============================================================================
+// Deposit
+// ============================================================================
+
+// getInputDomain returns the record of the domain an input method
+// addresses. It returns ErrForbiddenParam when the domain is not
+// registered or its status is DomainStatusPaused: such a call is not an
+// input. Admin methods keep using getRegisteredDomain, which accepts a
+// paused domain.
+func getInputDomain(context vm_context.AccountVmContext, domainId uint32) (*definition.DomainRecord, error) {
+	record, err := getRegisteredDomain(context, domainId)
+	if err != nil {
+		return nil, err
+	}
+	if record.Status == definition.DomainStatusPaused {
+		return nil, constants.ErrForbiddenParam
+	}
+	return record, nil
+}
+
+// admitInput assigns the next global input index to an accepted input of
+// domainId. It saves the assigned-index record {assetId, amount, fee} under
+// (domainId, index), adds a positive amount to the (domainId, assetId)
+// cumulative deposit total, and advances the global counter. Callers run
+// it only after every receive check has passed. A nil amount or fee is
+// zero; an input without a deposit passes types.ZeroHash and nil.
+func admitInput(storage db.DB, domainId uint32, assetId types.Hash, amount, fee *big.Int) error {
+	counter, err := definition.GetReceivedInputCounter(storage)
+	if err != nil {
+		return err
+	}
+	if counter.Count == math.MaxUint64 {
+		return constants.ErrSettlementInputIndexExhausted
+	}
+	if amount == nil {
+		amount = new(big.Int)
+	}
+
+	record := &definition.AssignedIndexRecord{
+		AssignedIndexRecordKey: definition.AssignedIndexRecordKey{DomainId: domainId, GlobalInputIndex: counter.Count},
+		AssetId:                assetId,
+		Amount:                 amount,
+		Fee:                    fee,
+	}
+	if err := record.Save(storage); err != nil {
+		return err
+	}
+
+	if amount.Sign() > 0 {
+		total, err := definition.GetCumulativeDepositTotal(storage, domainId, assetId)
+		if err != nil {
+			return err
+		}
+		total.CumulativeDeposited = new(big.Int).Add(total.CumulativeDeposited, amount)
+		if err := total.Save(storage); err != nil {
+			return err
+		}
+	}
+
+	counter.Count++
+	return counter.Save(storage)
+}
+
+// saveCustodyCounters saves c when
+// totalReleased + pendingWithdrawalReserve <= totalDeposited, the ESCROW
+// conservation invariant. Otherwise it returns
+// ErrSettlementConservationViolated and writes nothing. Every path that
+// changes the counters saves them through this function.
+func saveCustodyCounters(storage db.DB, c *definition.ConservationCounters) error {
+	committed := new(big.Int).Add(c.TotalReleased, c.PendingWithdrawalReserve)
+	if committed.Cmp(c.TotalDeposited) > 0 {
+		return constants.ErrSettlementConservationViolated
+	}
+	return c.Save(storage)
+}
+
+const (
+	assetFlowEntrySize = 96
+	assetFlowAmountLen = 32
+)
+
+type assetFlowEntry struct {
+	AssetId         types.Hash
+	DepositCredit   *big.Int
+	WithdrawalDebit *big.Int
+}
+
+// decodeAssetFlowSummary decodes the SPEC §27.6 encoding: u32 BE count N,
+// then N entries of asset_id(32) ‖ deposit_credit(u256 BE) ‖
+// withdrawal_debit(u256 BE). The caller passes exactly the summary bytes:
+// trailing bytes are an error, so a caller reading the summary inline
+// from a larger encoding reads N, bounds it, and slices 4 + N*96 bytes
+// first.
+func decodeAssetFlowSummary(b []byte) ([]assetFlowEntry, error) {
+	if len(b) < 4 {
+		return nil, constants.ErrSettlementInvalidAssetFlow
+	}
+	n := uint64(binary.BigEndian.Uint32(b[:4]))
+	if n > constants.MaxAssetsPerBatch || uint64(len(b)) != 4+n*assetFlowEntrySize {
+		return nil, constants.ErrSettlementInvalidAssetFlow
+	}
+
+	entries := make([]assetFlowEntry, 0, n)
+	for i := uint64(0); i < n; i++ {
+		raw := b[4+i*assetFlowEntrySize : 4+(i+1)*assetFlowEntrySize]
+		var entry assetFlowEntry
+		copy(entry.AssetId[:], raw[:32])
+		if _, err := definition.ZTSFromAssetId(entry.AssetId); err != nil {
+			return nil, constants.ErrSettlementInvalidAssetFlow
+		}
+		if i > 0 && bytes.Compare(entry.AssetId[:], entries[i-1].AssetId[:]) <= 0 {
+			return nil, constants.ErrSettlementInvalidAssetFlow
+		}
+		entry.DepositCredit = new(big.Int).SetBytes(raw[32 : 32+assetFlowAmountLen])
+		entry.WithdrawalDebit = new(big.Int).SetBytes(raw[32+assetFlowAmountLen:])
+		if entry.DepositCredit.Sign() == 0 && entry.WithdrawalDebit.Sign() == 0 {
+			return nil, constants.ErrSettlementInvalidAssetFlow
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// verifyAssetFlowDeposits checks a batch's AssetFlowSummary against the
+// deposits recorded at the batch's assigned indices. inputs are the
+// domain's assigned-index records in [firstInputSeq, lastInputSeq],
+// supplied by SubmitBatch, so the cost is bounded by MaxBatchInputs.
+// WithdrawalDebit is not checked here.
+func verifyAssetFlowDeposits(summary []byte, inputs []*definition.AssignedIndexRecord) error {
+	entries, err := decodeAssetFlowSummary(summary)
+	if err != nil {
+		return err
+	}
+
+	deposited := make(map[types.Hash]*big.Int)
+	for _, input := range inputs {
+		if input.Amount == nil || input.Amount.Sign() <= 0 {
+			continue
+		}
+		sum, ok := deposited[input.AssetId]
+		if !ok {
+			sum = new(big.Int)
+			deposited[input.AssetId] = sum
+		}
+		sum.Add(sum, input.Amount)
+	}
+
+	for _, entry := range entries {
+		sum, ok := deposited[entry.AssetId]
+		if !ok {
+			sum = new(big.Int)
+		}
+		if entry.DepositCredit.Cmp(sum) != 0 {
+			return constants.ErrSettlementInvalidAssetFlow
+		}
+		delete(deposited, entry.AssetId)
+	}
+	if len(deposited) != 0 {
+		return constants.ErrSettlementInvalidAssetFlow
+	}
+	return nil
+}
+
+type SettlementDepositParam struct {
+	DomainId       uint32
+	TargetContract types.Hash
+	PlasmaLimit    uint64
+}
+
+type SettlementDepositMethod struct{ MethodName string }
+
+func (p *SettlementDepositMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementDepositMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementDepositParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() <= 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if !constants.IsInputGasInBounds(param.PlasmaLimit) {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.TargetContract, param.PlasmaLimit)
+	return err
+}
+
+// ReceiveBlock custodies the deposit. The first three steps write
+// nothing, so a rejected deposit consumes no input index and the VM
+// returns the attached value. When admission fails after the counters are
+// saved, the VM rollback discards every write.
+func (p *SettlementDepositMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementDepositParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	storage := context.Storage()
+	assetId := definition.AssetIdFromZTS(sendBlock.TokenStandard)
+	if _, err := definition.GetAssetConfig(storage, param.DomainId, assetId); err == constants.ErrDataNonExistent {
+		return nil, constants.ErrInvalidToken
+	} else if err != nil {
+		return nil, err
+	}
+
+	counters, err := definition.GetConservationCounters(storage, param.DomainId, assetId)
+	if err != nil {
+		return nil, err
+	}
+	counters.TotalDeposited = new(big.Int).Add(counters.TotalDeposited, sendBlock.Amount)
+	if err := saveCustodyCounters(storage, counters); err != nil {
+		return nil, err
+	}
+
+	if err := admitInput(storage, param.DomainId, assetId, sendBlock.Amount, nil); err != nil {
+		return nil, err
+	}
 	return nil, nil
 }

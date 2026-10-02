@@ -137,3 +137,23 @@ func TestIsZnnPerByteInBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestIsMaxBatchMintInBounds(t *testing.T) {
+	if !IsMaxBatchMintInBounds(MaxBatchMintFloor) {
+		t.Fatal("expected floor to be in bounds")
+	}
+	if !IsMaxBatchMintInBounds(MaxBatchMintCeiling) {
+		t.Fatal("expected ceiling to be in bounds")
+	}
+	belowFloor := new(big.Int).Sub(MaxBatchMintFloor, big.NewInt(1))
+	if IsMaxBatchMintInBounds(belowFloor) {
+		t.Fatal("expected below floor to be rejected")
+	}
+	aboveCeiling := new(big.Int).Add(MaxBatchMintCeiling, big.NewInt(1))
+	if IsMaxBatchMintInBounds(aboveCeiling) {
+		t.Fatal("expected above ceiling to be rejected")
+	}
+	if IsMaxBatchMintInBounds(nil) {
+		t.Fatal("expected nil to be rejected")
+	}
+}

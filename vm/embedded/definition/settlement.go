@@ -63,6 +63,10 @@ const (
 			{"name":"active","type":"bool"}]},
 		{"type":"function","name":"InitiateEscapeHatch","inputs":[
 			{"name":"domainId","type":"uint32"}]},
+		{"type":"function","name":"Deposit","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"targetContract","type":"hash"},
+			{"name":"plasmaLimit","type":"uint64"}]},
 
 		{"type":"variable","name":"domainRecord","inputs":[
 			{"name":"domainClass","type":"uint8"},
@@ -238,8 +242,7 @@ const (
 	SettlementSetDomainConfigMethodName    = "SetDomainConfig"
 	SettlementSetAssetConfigMethodName     = "SetAssetConfig"
 	SettlementSetApprovedDAModesMethodName = "SetApprovedDAModes"
-	// declared for Tickets 11+, not yet wired
-	SettlementDepositMethodName = "Deposit"
+	SettlementDepositMethodName            = "Deposit"
 	// declared for Tickets 11+, not yet wired
 	SettlementSubmitBatchMethodName = "SubmitBatch"
 	// declared for Tickets 11+, not yet wired
@@ -791,6 +794,28 @@ func GetCumulativeDepositTotal(context db.DB, domainId uint32, assetId types.Has
 // ============================================================================
 // Conservation counters (per domain, asset)
 // ============================================================================
+
+// AssetIdFromZTS returns the canonical AssetID of zts: 22 zero bytes, then
+// the 10 ZTS bytes in native order.
+func AssetIdFromZTS(zts types.ZenonTokenStandard) types.Hash {
+	var id types.Hash
+	copy(id[22:], zts[:])
+	return id
+}
+
+// ZTSFromAssetId returns the ZTS held in id[22:32]. It returns
+// constants.ErrForbiddenParam when any byte of id[0:22] is non-zero, which
+// rejects an asset id that carries a ZTS at the wrong offset.
+func ZTSFromAssetId(id types.Hash) (types.ZenonTokenStandard, error) {
+	var zts types.ZenonTokenStandard
+	for _, b := range id[0:22] {
+		if b != 0 {
+			return zts, constants.ErrForbiddenParam
+		}
+	}
+	copy(zts[:], id[22:])
+	return zts, nil
+}
 
 func getConservationCountersKey(domainId uint32, assetId types.Hash) []byte {
 	return common.JoinBytes(conservationCountersPrefix, uint32ToBytesBE(domainId), assetId.Bytes())

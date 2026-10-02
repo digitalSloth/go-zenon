@@ -1129,3 +1129,177 @@ func TestSettlement_RegisterDomain_StatusCallWithOtherCapsRestartsChallenge(t *t
 		t.Fatalf("expected a restarted challenge, old %v new %v", h, got)
 	}
 }
+
+func depositStep(from types.Address, zts types.ZenonTokenStandard, amount int64, domainId uint32, target types.Hash, plasmaLimit uint64) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementDepositMethodName, domainId, target, plasmaLimit)
+	block.TokenStandard = zts
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+// configureAsset runs the two SetAssetConfig calls that complete the
+// time challenge.
+func configureAsset(t *testing.T, z mock.MockZenon, domainId uint32, assetId types.Hash) {
+	t.Helper()
+	step := setAssetConfigStep(g.User5.Address, domainId, assetId, big.NewInt(1000))
+	settlementCall(t, z, step, nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setAssetConfigStep(g.User5.Address, domainId, assetId, big.NewInt(1000)), nil)
+}
+
+func inputCounterOf(t *testing.T, z mock.MockZenon) uint64 {
+	t.Helper()
+	counter, err := definition.GetReceivedInputCounter(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	return counter.Count
+}
+
+func totalDepositedOf(t *testing.T, z mock.MockZenon, domainId uint32, assetId types.Hash) *big.Int {
+	t.Helper()
+	counters, err := definition.GetConservationCounters(settlementStorage(t, z), domainId, assetId)
+	common.FailIfErr(t, err)
+	return counters.TotalDeposited
+}
+
+func balanceOf(t *testing.T, z mock.MockZenon, address types.Address, zts types.ZenonTokenStandard) int64 {
+	t.Helper()
+	amount, err := z.Chain().GetFrontierAccountStore(address).GetBalance(zts)
+	common.FailIfErr(t, err)
+	if amount == nil {
+		return 0
+	}
+	return amount.Int64()
+}
+
+func TestSettlement_Deposit_Custody(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1)
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	configureAsset(t, z, 1, znnAsset)
+	target := types.Hash{0x07}
+	user := g.User1.Address
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 100, 1, target, 5000), nil)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start-100)
+	if got := totalDepositedOf(t, z, 1, znnAsset); got.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("expected TotalDeposited 100, got %v", got)
+	}
+	record, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 0)
+	common.FailIfErr(t, err)
+	if record.Amount.Cmp(big.NewInt(100)) != 0 || record.AssetId != znnAsset {
+		t.Fatalf("unexpected record %+v", record)
+	}
+	total, err := definition.GetCumulativeDepositTotal(settlementStorage(t, z), 1, znnAsset)
+	common.FailIfErr(t, err)
+	if total.CumulativeDeposited.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("expected cumulative 100, got %v", total.CumulativeDeposited)
+	}
+	if got := inputCounterOf(t, z); got != 1 {
+		t.Fatalf("expected counter 1, got %d", got)
+	}
+
+	// accepted, rejected, accepted: indices stay consecutive
+	settlementCall(t, z, depositStep(user, types.QsrTokenStandard, 7, 1, target, 5000), constants.ErrInvalidToken)
+	autoreceive(t, z, user)
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 5, 1, target, 5000), nil)
+	if got := inputCounterOf(t, z); got != 2 {
+		t.Fatalf("expected counter 2, got %d", got)
+	}
+	record, err = definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 1)
+	common.FailIfErr(t, err)
+	if record.Amount.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("expected index 1 amount 5, got %v", record.Amount)
+	}
+	if _, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 2); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no record at index 2, got %v", err)
+	}
+}
+
+func TestSettlement_Deposit_Rejections(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1, 2)
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	configureAsset(t, z, 1, znnAsset)
+	target := types.Hash{0x07}
+	user := g.User1.Address
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+	startQsr := balanceOf(t, z, user, types.QsrTokenStandard)
+
+	expectUntouched := func() {
+		t.Helper()
+		autoreceive(t, z, user)
+		z.ExpectBalance(user, types.ZnnTokenStandard, start)
+		z.ExpectBalance(user, types.QsrTokenStandard, startQsr)
+		if got := inputCounterOf(t, z); got != 0 {
+			t.Fatalf("expected counter 0, got %d", got)
+		}
+		if got := totalDepositedOf(t, z, 1, znnAsset); got.Sign() != 0 {
+			t.Fatalf("expected TotalDeposited 0, got %v", got)
+		}
+		if _, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 0); err != constants.ErrDataNonExistent {
+			t.Fatalf("expected no record, got %v", err)
+		}
+	}
+
+	// unconfigured asset
+	settlementCall(t, z, depositStep(user, types.QsrTokenStandard, 7, 1, target, 5000), constants.ErrInvalidToken)
+	expectUntouched()
+
+	// unregistered domain
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 7, 9, target, 5000), constants.ErrForbiddenParam)
+	expectUntouched()
+
+	// an asset configured for domain 1 only
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 7, 2, target, 5000), constants.ErrInvalidToken)
+	expectUntouched()
+
+	// a SetAssetConfig challenge that has started but not completed
+	qsrAsset := assetIdFor(types.QsrTokenStandard)
+	settlementCall(t, z, setAssetConfigStep(g.User5.Address, 1, qsrAsset, big.NewInt(1000)), nil)
+	settlementCall(t, z, depositStep(user, types.QsrTokenStandard, 7, 1, target, 5000), constants.ErrInvalidToken)
+	expectUntouched()
+
+	// a paused domain
+	paused := phase1Domain(1)
+	paused.Status = definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, paused), nil)
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 7, 1, target, 5000), constants.ErrForbiddenParam)
+	expectUntouched()
+
+	settlementCall(t, z, registerDomainStep(g.User5.Address, phase1Domain(1)), nil)
+	settlementCall(t, z, depositStep(user, types.ZnnTokenStandard, 7, 1, target, 5000), nil)
+	if got := inputCounterOf(t, z); got != 1 {
+		t.Fatalf("expected counter 1, got %d", got)
+	}
+	if _, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 0); err != nil {
+		t.Fatalf("expected record at index 0, got %v", err)
+	}
+}
+
+func TestSettlement_Deposit_SendValidation(t *testing.T) {
+	z := newSettlementZenon(t)
+	target := types.Hash{0x07}
+
+	z.InsertSendBlock(depositStep(g.User1.Address, types.ZnnTokenStandard, 0, 1, target, 5000), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+
+	z.InsertSendBlock(depositStep(g.User1.Address, types.ZnnTokenStandard, 1, 1, target, constants.MaxInputGas+1), constants.ErrForbiddenParam, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+}
+
+func TestSettlement_Deposit_IgnoresPauseScopes(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1)
+	configureAsset(t, z, 1, assetIdFor(types.ZnnTokenStandard))
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeSubmit, true), nil)
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeRelay, true), nil)
+	settlementCall(t, z, depositStep(g.User1.Address, types.ZnnTokenStandard, 3, 1, types.Hash{0x07}, 5000), nil)
+	if got := inputCounterOf(t, z); got != 1 {
+		t.Fatalf("expected counter 1, got %d", got)
+	}
+}
