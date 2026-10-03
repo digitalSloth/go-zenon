@@ -13,7 +13,8 @@ const (
 	MaxDeployChunkData       = 1024 * 15  // 15 KiB
 	MaxCodeSize              = 1024 * 256 // 256 KiB (pre-instrumentation)
 	MaxChunkCount            = 18
-	DeploymentExpiryWindow   = 2880       // momentum heights
+	DeploymentExpiryWindow   = 2880 // momentum heights
+	MaxContractMetadataSize  = 256
 	MaxMemory                = 64 * 65536 // 4 MiB (64 WASM pages)
 	MaxStackDepth            = 512
 	MaxInstrumentedCodeSize  = 1024 * 1024 // 1 MiB post-instrumentation ceiling
@@ -26,6 +27,7 @@ const (
 	MaxOutboxPayloadSize     = 1024 * 8 // 8 KiB
 	MaxAssetsPerBatch        = 16
 	MaxWithdrawalsPerUpdate  = 16
+	MaxDeploySweepPerStart   = 2  // expired deploy starts swept per accepted start
 	FeeBurnShare             = 30 // percent of each settled fee burned
 )
 

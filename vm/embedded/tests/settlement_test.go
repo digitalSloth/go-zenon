@@ -9,6 +9,7 @@ import (
 
 	"github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
+	"github.com/zenon-network/go-zenon/vm"
 	"github.com/zenon-network/go-zenon/vm/constants"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
 
@@ -1302,4 +1303,655 @@ func TestSettlement_Deposit_IgnoresPauseScopes(t *testing.T) {
 	if got := inputCounterOf(t, z); got != 1 {
 		t.Fatalf("expected counter 1, got %d", got)
 	}
+}
+
+// ============================================================================
+// Chunked contract deployment
+// ============================================================================
+
+const deployDomain = uint32(1)
+
+// deployPayload returns n deterministic bytes.
+func deployPayload(n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = byte(i*7 + 3)
+	}
+	return out
+}
+
+func deployChunkCount(totalSize uint64) uint32 {
+	return uint32((totalSize + constants.MaxDeployChunkData - 1) / constants.MaxDeployChunkData)
+}
+
+func deployStartStep(from types.Address, domainId uint32, codeHash types.Hash, totalSize uint64, chunkCount uint32, metadata []byte) *nom.AccountBlock {
+	return settlementStep(from, definition.SettlementDeployContractStartMethodName,
+		domainId, codeHash, types.NewHash(metadata), totalSize, chunkCount, metadata)
+}
+
+func deployChunkStep(from types.Address, domainId uint32, codeHash types.Hash, index uint32, data []byte) *nom.AccountBlock {
+	return settlementStep(from, definition.SettlementDeployContractChunkMethodName,
+		domainId, codeHash, index, types.NewHash(data), data)
+}
+
+func deployFinalizeStep(from types.Address, domainId uint32, codeHash types.Hash, zts types.ZenonTokenStandard, amount int64) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementDeployContractFinalizeMethodName, domainId, codeHash)
+	block.TokenStandard = zts
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+// startDeploy runs an accepted DeployContractStart for a payload of
+// totalSize bytes.
+func startDeploy(t *testing.T, z mock.MockZenon, from types.Address, codeHash types.Hash, totalSize uint64) {
+	t.Helper()
+	settlementCall(t, z, deployStartStep(from, deployDomain, codeHash, totalSize, deployChunkCount(totalSize), nil), nil)
+}
+
+// sendChunks runs accepted DeployContractChunk calls for the listed
+// indices of payload, in the listed order.
+func sendChunks(t *testing.T, z mock.MockZenon, from types.Address, codeHash types.Hash, payload []byte, order ...uint32) {
+	t.Helper()
+	for _, i := range order {
+		settlementCall(t, z, deployChunkStep(from, deployDomain, codeHash, i, deployChunkData(payload, i)), nil)
+	}
+}
+
+func deployChunkData(payload []byte, index uint32) []byte {
+	start := int(index) * constants.MaxDeployChunkData
+	end := start + constants.MaxDeployChunkData
+	if end > len(payload) {
+		end = len(payload)
+	}
+	return payload[start:end]
+}
+
+func deployRecordOf(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash) (*definition.DeployRecord, error) {
+	t.Helper()
+	return definition.GetDeployRecord(settlementStorage(t, z), deployDomain, deployer, codeHash)
+}
+
+func expectDeployRecord(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash) *definition.DeployRecord {
+	t.Helper()
+	record, err := deployRecordOf(t, z, deployer, codeHash)
+	if err != nil {
+		t.Fatalf("expected a deploy record, got %v", err)
+	}
+	return record
+}
+
+func expectNoDeployRecord(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash) {
+	t.Helper()
+	if _, err := deployRecordOf(t, z, deployer, codeHash); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no deploy record, got %v", err)
+	}
+}
+
+func deployChunkOf(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash, startHeight uint64, index uint32) (*definition.DeployChunk, error) {
+	t.Helper()
+	key := definition.DeployChunkKey{
+		DeployRecordKey: definition.DeployRecordKey{DomainId: deployDomain, Deployer: deployer, CodeHash: codeHash},
+		StartHeight:     startHeight,
+		ChunkIndex:      index,
+	}
+	return definition.GetDeployChunk(settlementStorage(t, z), key)
+}
+
+func expectDeployChunk(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash, startHeight uint64, index uint32, want types.Hash) {
+	t.Helper()
+	chunk, err := deployChunkOf(t, z, deployer, codeHash, startHeight, index)
+	if err != nil {
+		t.Fatalf("expected chunk entry %d at start height %d, got %v", index, startHeight, err)
+	}
+	if chunk.ChunkHash != want {
+		t.Fatalf("chunk entry %d holds %s, want %s", index, chunk.ChunkHash, want)
+	}
+}
+
+func expectNoDeployChunk(t *testing.T, z mock.MockZenon, deployer types.Address, codeHash types.Hash, startHeight uint64, index uint32) {
+	t.Helper()
+	if _, err := deployChunkOf(t, z, deployer, codeHash, startHeight, index); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected no chunk entry %d at start height %d, got %v", index, startHeight, err)
+	}
+}
+
+func expectStartQueue(t *testing.T, z mock.MockZenon, head, tail uint64) {
+	t.Helper()
+	meta, err := definition.GetDeployStartQueueMeta(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	if meta.Head != head || meta.Tail != tail {
+		t.Fatalf("expected start queue head %d tail %d, got head %d tail %d", head, tail, meta.Head, meta.Tail)
+	}
+}
+
+func expectCounter(t *testing.T, z mock.MockZenon, want uint64) {
+	t.Helper()
+	if got := inputCounterOf(t, z); got != want {
+		t.Fatalf("expected input counter %d, got %d", want, got)
+	}
+}
+
+func feesCollectedOf(t *testing.T, z mock.MockZenon) *big.Int {
+	t.Helper()
+	counters, err := definition.GetFeeCounters(settlementStorage(t, z))
+	common.FailIfErr(t, err)
+	return counters.TotalFeesCollected
+}
+
+func expectFeesCollected(t *testing.T, z mock.MockZenon, want int64) {
+	t.Helper()
+	if got := feesCollectedOf(t, z); got.Cmp(big.NewInt(want)) != 0 {
+		t.Fatalf("expected TotalFeesCollected %d, got %v", want, got)
+	}
+}
+
+// setBytecodePrice stores a Periphery config through both calls of its
+// time challenge.
+func setBytecodePrice(t *testing.T, z mock.MockZenon, price int64) {
+	t.Helper()
+	constants.MinSoftDelay = 10
+	settlementCall(t, z, setPeripheryConfigStep(g.User5.Address, big.NewInt(price), big.NewInt(1)), nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setPeripheryConfigStep(g.User5.Address, big.NewInt(price), big.NewInt(1)), nil)
+}
+
+// newDeployZenon starts a settlement chain with domain 1 registered and
+// a bytecode price of 3 ZNN base units per byte.
+func newDeployZenon(t *testing.T) mock.MockZenon {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, deployDomain)
+	setBytecodePrice(t, z, 3)
+	return z
+}
+
+var deployCodeHash = types.Hash{0xC0, 0xDE}
+
+func TestSettlement_Deploy_MultiChunkFlow(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(constants.MaxDeployChunkData + 100)
+	payload := deployPayload(int(total))
+	fee := int64(total) * 3
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	startDeploy(t, z, user, deployCodeHash, total)
+	record := expectDeployRecord(t, z, user, deployCodeHash)
+	if record.TotalSize != total || record.ChunkCount != 2 || record.ReceivedCount != 0 {
+		t.Fatalf("unexpected record %+v", record)
+	}
+	sendChunks(t, z, user, deployCodeHash, payload, 1, 0)
+	record = expectDeployRecord(t, z, user, deployCodeHash)
+	if record.ReceivedCount != 2 {
+		t.Fatalf("expected ReceivedCount 2, got %d", record.ReceivedCount)
+	}
+	for i := uint32(0); i < 2; i++ {
+		expectDeployChunk(t, z, user, deployCodeHash, record.StartHeight, i, types.NewHash(deployChunkData(payload, i)))
+	}
+	expectCounter(t, z, 3)
+
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), nil)
+	expectNoDeployRecord(t, z, user, deployCodeHash)
+	expectNoDeployChunk(t, z, user, deployCodeHash, record.StartHeight, 0)
+	expectNoDeployChunk(t, z, user, deployCodeHash, record.StartHeight, 1)
+	expectCounter(t, z, 4)
+	assigned, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), deployDomain, 3)
+	common.FailIfErr(t, err)
+	if assigned.Fee == nil || assigned.Fee.Cmp(big.NewInt(fee)) != 0 {
+		t.Fatalf("expected assigned record fee %d, got %v", fee, assigned.Fee)
+	}
+	expectFeesCollected(t, z, fee)
+	z.ExpectBalance(user, types.ZnnTokenStandard, startBalance-fee)
+	counters, err := definition.GetConservationCounters(settlementStorage(t, z), deployDomain, znnAsset)
+	common.FailIfErr(t, err)
+	if counters.TotalDeposited.Sign() != 0 || counters.PendingWithdrawalReserve.Sign() != 0 || counters.TotalReleased.Sign() != 0 {
+		t.Fatalf("expected untouched conservation counters, got %+v", counters)
+	}
+	cumulative, err := definition.GetCumulativeDepositTotal(settlementStorage(t, z), deployDomain, znnAsset)
+	common.FailIfErr(t, err)
+	if cumulative.CumulativeDeposited.Sign() != 0 {
+		t.Fatalf("expected untouched cumulative total, got %v", cumulative.CumulativeDeposited)
+	}
+
+	// a consumed record frees its key
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	startDeploy(t, z, user, deployCodeHash, total)
+	expectDeployRecord(t, z, user, deployCodeHash)
+}
+
+func TestSettlement_Deploy_SingleChunkExactSize(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	payload := deployPayload(100)
+
+	startDeploy(t, z, user, deployCodeHash, 100)
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 300), nil)
+	expectNoDeployRecord(t, z, user, deployCodeHash)
+	expectFeesCollected(t, z, 300)
+}
+
+func TestSettlement_Deploy_FullMultipleOfChunkSize(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(2 * constants.MaxDeployChunkData)
+	payload := deployPayload(int(total))
+
+	startDeploy(t, z, user, deployCodeHash, total)
+	sendChunks(t, z, user, deployCodeHash, payload, 0, 1)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, int64(total)*3), nil)
+	expectNoDeployRecord(t, z, user, deployCodeHash)
+}
+
+func TestSettlement_Deploy_MaxCodeSize(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(constants.MaxCodeSize)
+	chunks := deployChunkCount(total)
+	if chunks > constants.MaxChunkCount {
+		t.Fatalf("max code size needs %d chunks, above the %d limit", chunks, constants.MaxChunkCount)
+	}
+	startDeploy(t, z, user, deployCodeHash, total)
+	record := expectDeployRecord(t, z, user, deployCodeHash)
+	if record.ChunkCount != chunks {
+		t.Fatalf("expected %d chunks, got %d", chunks, record.ChunkCount)
+	}
+}
+
+func TestSettlement_Deploy_FeeRejections(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(100)
+	fee := int64(300)
+	payload := deployPayload(int(total))
+	startDeploy(t, z, user, deployCodeHash, total)
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+	startQsr := balanceOf(t, z, user, types.QsrTokenStandard)
+	startHeight := expectDeployRecord(t, z, user, deployCodeHash).StartHeight
+
+	// send validation
+	z.InsertSendBlock(deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 0), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertSendBlock(deployFinalizeStep(user, deployDomain, deployCodeHash, types.QsrTokenStandard, fee), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+
+	// receive validation
+	for _, amount := range []int64{fee - 1, fee + 1} {
+		settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, amount), constants.ErrInvalidTokenOrAmount)
+		autoreceive(t, z, user)
+		z.ExpectBalance(user, types.ZnnTokenStandard, startBalance)
+		z.ExpectBalance(user, types.QsrTokenStandard, startQsr)
+		expectDeployRecord(t, z, user, deployCodeHash)
+		expectDeployChunk(t, z, user, deployCodeHash, startHeight, 0, types.NewHash(payload))
+		expectCounter(t, z, 2)
+		expectFeesCollected(t, z, 0)
+	}
+
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), nil)
+	expectFeesCollected(t, z, fee)
+}
+
+func TestSettlement_Deploy_FeeKeptWhenChunksDoNotMatchCodeHash(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	mismatched := types.Hash{0xEE}
+
+	startDeploy(t, z, user, mismatched, 100)
+	sendChunks(t, z, user, mismatched, deployPayload(100), 0)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, mismatched, types.ZnnTokenStandard, 300), nil)
+	expectNoDeployRecord(t, z, user, mismatched)
+	expectFeesCollected(t, z, 300)
+}
+
+func TestSettlement_Deploy_StartRejections(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(100)
+
+	// duplicate live record from the same deployer
+	startDeploy(t, z, user, deployCodeHash, total)
+	settlementCall(t, z, deployStartStep(user, deployDomain, deployCodeHash, total, 1, nil), constants.ErrForbiddenParam)
+	expectCounter(t, z, 1)
+
+	// unregistered domain
+	settlementCall(t, z, deployStartStep(user, 9, deployCodeHash, total, 1, nil), constants.ErrForbiddenParam)
+	expectCounter(t, z, 1)
+
+	// paused domain
+	registerDomains(t, z, 2)
+	paused := phase1Domain(2)
+	paused.Status = definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, paused), nil)
+	settlementCall(t, z, deployStartStep(user, 2, deployCodeHash, total, 1, nil), constants.ErrForbiddenParam)
+	expectCounter(t, z, 1)
+
+	// send validation
+	other := types.Hash{0xAB}
+	badMetadataHash := settlementStep(user, definition.SettlementDeployContractStartMethodName,
+		deployDomain, other, types.Hash{0x01}, total, uint32(1), []byte{})
+	longMetadata := deployPayload(constants.MaxContractMetadataSize + 1)
+	for name, block := range map[string]*nom.AccountBlock{
+		"metadata hash mismatch": badMetadataHash,
+		"metadata too long":      deployStartStep(user, deployDomain, other, total, 1, longMetadata),
+		"zero total size":        deployStartStep(user, deployDomain, other, 0, 0, nil),
+		"total size too large":   deployStartStep(user, deployDomain, other, constants.MaxCodeSize+1, deployChunkCount(constants.MaxCodeSize+1), nil),
+		"chunk count too low":    deployStartStep(user, deployDomain, other, constants.MaxDeployChunkData+1, 1, nil),
+		"chunk count too high":   deployStartStep(user, deployDomain, other, total, 2, nil),
+		"chunk count zero":       deployStartStep(user, deployDomain, other, total, 0, nil),
+	} {
+		t.Run(name, func(t *testing.T) { settlementRejectedAtSend(z, block) })
+	}
+	maxMetadata := deployPayload(constants.MaxContractMetadataSize)
+	settlementCall(t, z, deployStartStep(user, deployDomain, other, total, 1, maxMetadata), nil)
+	expectCounter(t, z, 2)
+
+	withAmount := deployStartStep(user, deployDomain, types.Hash{0xAC}, total, 1, nil)
+	withAmount.Amount = big.NewInt(1)
+	z.InsertSendBlock(withAmount, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	expectCounter(t, z, 2)
+}
+
+func TestSettlement_Deploy_ChunkRejections(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(constants.MaxDeployChunkData + 100)
+	payload := deployPayload(int(total))
+	chunk0 := deployChunkData(payload, 0)
+	chunk1 := deployChunkData(payload, 1)
+
+	// absent record
+	settlementCall(t, z, deployChunkStep(user, deployDomain, deployCodeHash, 0, chunk0), constants.ErrDataNonExistent)
+	expectCounter(t, z, 0)
+
+	startDeploy(t, z, user, deployCodeHash, total)
+	expectCounter(t, z, 1)
+
+	// a chunk from another address looks up its own key
+	settlementCall(t, z, deployChunkStep(g.User2.Address, deployDomain, deployCodeHash, 0, chunk0), constants.ErrDataNonExistent)
+	record := expectDeployRecord(t, z, user, deployCodeHash)
+	if record.ReceivedCount != 0 {
+		t.Fatalf("expected the deployer's ReceivedCount 0, got %d", record.ReceivedCount)
+	}
+	expectNoDeployChunk(t, z, user, deployCodeHash, record.StartHeight, 0)
+	expectCounter(t, z, 1)
+
+	for _, tc := range []struct {
+		index uint32
+		data  []byte
+	}{
+		{2, chunk0},                 // index equals chunk count
+		{0, chunk0[:len(chunk0)-1]}, // non-last chunk too short
+		{1, append(append([]byte{}, chunk1...), 0x01)}, // last chunk too long
+		{1, chunk1[:len(chunk1)-1]},                    // last chunk too short
+		{0, chunk1},                                    // non-last chunk with the last chunk's length
+	} {
+		settlementCall(t, z, deployChunkStep(user, deployDomain, deployCodeHash, tc.index, tc.data), constants.ErrForbiddenParam)
+		autoreceive(t, z, user)
+		expectCounter(t, z, 1)
+	}
+	record = expectDeployRecord(t, z, user, deployCodeHash)
+	if record.ReceivedCount != 0 {
+		t.Fatalf("expected ReceivedCount 0, got %d", record.ReceivedCount)
+	}
+	expectNoDeployChunk(t, z, user, deployCodeHash, record.StartHeight, 0)
+	expectNoDeployChunk(t, z, user, deployCodeHash, record.StartHeight, 1)
+
+	// duplicate index
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	expectCounter(t, z, 2)
+	settlementCall(t, z, deployChunkStep(user, deployDomain, deployCodeHash, 0, chunk0), constants.ErrForbiddenParam)
+	expectCounter(t, z, 2)
+	if got := expectDeployRecord(t, z, user, deployCodeHash).ReceivedCount; got != 1 {
+		t.Fatalf("expected ReceivedCount 1 after the rejected duplicate, got %d", got)
+	}
+
+	// send validation
+	badHash := settlementStep(user, definition.SettlementDeployContractChunkMethodName,
+		deployDomain, deployCodeHash, uint32(1), types.Hash{0x01}, chunk1)
+	settlementRejectedAtSend(z, badHash)
+	oversize := deployPayload(constants.MaxDeployChunkData + 1)
+	settlementRejectedAtSend(z, deployChunkStep(user, deployDomain, deployCodeHash, 1, oversize))
+	settlementRejectedAtSend(z, deployChunkStep(user, deployDomain, deployCodeHash, 1, []byte{}))
+	withAmount := deployChunkStep(user, deployDomain, deployCodeHash, 1, chunk1)
+	withAmount.Amount = big.NewInt(1)
+	z.InsertSendBlock(withAmount, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	expectCounter(t, z, 2)
+}
+
+func TestSettlement_Deploy_FinalizeRejections(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(constants.MaxDeployChunkData + 100)
+	payload := deployPayload(int(total))
+	fee := int64(total) * 3
+
+	startDeploy(t, z, user, deployCodeHash, total)
+	sendChunks(t, z, user, deployCodeHash, payload, 1)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), constants.ErrForbiddenParam)
+	autoreceive(t, z, user)
+	expectDeployRecord(t, z, user, deployCodeHash)
+	expectCounter(t, z, 2)
+	expectFeesCollected(t, z, 0)
+
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	settlementCall(t, z, deployFinalizeStep(g.User2.Address, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	expectDeployRecord(t, z, user, deployCodeHash)
+	expectCounter(t, z, 3)
+	expectFeesCollected(t, z, 0)
+
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), nil)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	expectCounter(t, z, 4)
+	expectFeesCollected(t, z, fee)
+}
+
+func TestSettlement_Deploy_FinalizeWithoutPeripheryConfig(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, deployDomain)
+	user := g.User1.Address
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	startDeploy(t, z, user, deployCodeHash, 100)
+	sendChunks(t, z, user, deployCodeHash, deployPayload(100), 0)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 300), constants.ErrDataNonExistent)
+	autoreceive(t, z, user)
+	z.ExpectBalance(user, types.ZnnTokenStandard, startBalance)
+	expectDeployRecord(t, z, user, deployCodeHash)
+	expectCounter(t, z, 2)
+	expectFeesCollected(t, z, 0)
+}
+
+// The expiry window spans enough momentums to trigger the periodic
+// contract updates, whose debug logs the shared setup would reject.
+func newDeployExpiryZenon(t *testing.T) mock.MockZenon {
+	z := mock.NewMockZenon(t)
+	t.Cleanup(z.StopPanic)
+	activateOffchainExecution(t, z)
+	saveBridgeConstants(t)
+	savedAdmin := types.NetworkAdmin
+	types.NetworkAdmin = g.User5.Address
+	t.Cleanup(func() { types.NetworkAdmin = savedAdmin })
+	registerDomains(t, z, deployDomain)
+	setBytecodePrice(t, z, 3)
+	return z
+}
+
+func TestSettlement_Deploy_Expiry(t *testing.T) {
+	z := newDeployExpiryZenon(t)
+	user := g.User1.Address
+	payload := deployPayload(100)
+
+	startDeploy(t, z, user, deployCodeHash, 100)
+	first := expectDeployRecord(t, z, user, deployCodeHash)
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	expectCounter(t, z, 2)
+
+	advanceMomentums(t, z, constants.DeploymentExpiryWindow)
+	settlementCall(t, z, deployChunkStep(user, deployDomain, deployCodeHash, 0, payload), constants.ErrDataNonExistent)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 300), constants.ErrDataNonExistent)
+	expectCounter(t, z, 2)
+	// an expired record stays stored until a start sweeps it
+	expectDeployRecord(t, z, user, deployCodeHash)
+
+	startDeploy(t, z, user, deployCodeHash, 100)
+	second := expectDeployRecord(t, z, user, deployCodeHash)
+	if second.StartHeight <= first.StartHeight+constants.DeploymentExpiryWindow-1 {
+		t.Fatalf("expected a fresh start height, got %d after %d", second.StartHeight, first.StartHeight)
+	}
+	if second.ReceivedCount != 0 {
+		t.Fatalf("expected ReceivedCount 0 after the restart, got %d", second.ReceivedCount)
+	}
+	expectNoDeployChunk(t, z, user, deployCodeHash, second.StartHeight, 0)
+	expectNoDeployChunk(t, z, user, deployCodeHash, first.StartHeight, 0)
+	expectStartQueue(t, z, 1, 2)
+	expectCounter(t, z, 3)
+}
+
+func TestSettlement_Deploy_ExpirySweep(t *testing.T) {
+	z := newDeployExpiryZenon(t)
+	u1, u2 := g.User1.Address, g.User2.Address
+	payload := deployPayload(100)
+	chunkHash := types.NewHash(payload)
+	x1, x2, f, y := types.Hash{0xA1}, types.Hash{0xA2}, types.Hash{0xA3}, types.Hash{0xA4}
+	k := deployCodeHash
+
+	startDeploy(t, z, u1, x1, 100)
+	x1Start := expectDeployRecord(t, z, u1, x1).StartHeight
+	sendChunks(t, z, u1, x1, payload, 0)
+	startDeploy(t, z, u1, x2, 100)
+	startDeploy(t, z, u1, k, 100)
+	kOld := expectDeployRecord(t, z, u1, k).StartHeight
+	sendChunks(t, z, u1, k, payload, 0)
+	startDeploy(t, z, u2, f, 100)
+	fStart := expectDeployRecord(t, z, u2, f).StartHeight
+	sendChunks(t, z, u2, f, payload, 0)
+	settlementCall(t, z, deployFinalizeStep(u2, deployDomain, f, types.ZnnTokenStandard, 300), nil)
+	expectCounter(t, z, 8)
+	expectStartQueue(t, z, 0, 4)
+
+	advanceMomentums(t, z, constants.DeploymentExpiryWindow)
+	settlementCall(t, z, deployStartStep(u1, 9, k, 100, 1, nil), constants.ErrForbiddenParam)
+	expectStartQueue(t, z, 0, 4)
+	expectDeployRecord(t, z, u1, x1)
+
+	startDeploy(t, z, u1, k, 100)
+	expectCounter(t, z, 9)
+	expectNoDeployRecord(t, z, u1, x1)
+	expectNoDeployChunk(t, z, u1, x1, x1Start, 0)
+	expectNoDeployRecord(t, z, u1, x2)
+	kNew := expectDeployRecord(t, z, u1, k)
+	if kNew.StartHeight <= kOld || kNew.ReceivedCount != 0 {
+		t.Fatalf("unexpected restarted record %+v after start height %d", kNew, kOld)
+	}
+	expectDeployChunk(t, z, u1, k, kOld, 0, chunkHash)
+	expectStartQueue(t, z, 2, 5)
+
+	sendChunks(t, z, u1, k, payload, 0)
+	expectCounter(t, z, 10)
+	if got := expectDeployRecord(t, z, u1, k).ReceivedCount; got != 1 {
+		t.Fatalf("expected ReceivedCount 1, got %d", got)
+	}
+
+	startDeploy(t, z, u2, y, 100)
+	expectCounter(t, z, 11)
+	kAfter := expectDeployRecord(t, z, u1, k)
+	if kAfter.StartHeight != kNew.StartHeight || kAfter.ReceivedCount != 1 {
+		t.Fatalf("unexpected record %+v after the sweep of the predecessor's entry", kAfter)
+	}
+	expectDeployChunk(t, z, u1, k, kNew.StartHeight, 0, chunkHash)
+	expectNoDeployChunk(t, z, u1, k, kOld, 0)
+	expectNoDeployRecord(t, z, u2, f)
+	expectNoDeployChunk(t, z, u2, f, fStart, 0)
+	expectStartQueue(t, z, 4, 6)
+
+	settlementCall(t, z, deployFinalizeStep(u1, deployDomain, k, types.ZnnTokenStandard, 300), nil)
+	expectCounter(t, z, 12)
+	expectNoDeployRecord(t, z, u1, k)
+	expectNoDeployChunk(t, z, u1, k, kNew.StartHeight, 0)
+}
+
+func TestSettlement_Deploy_IgnoresPauseScopes(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	payload := deployPayload(100)
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeSubmit, true), nil)
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeRelay, true), nil)
+	startDeploy(t, z, user, deployCodeHash, 100)
+	sendChunks(t, z, user, deployCodeHash, payload, 0)
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 300), nil)
+	expectCounter(t, z, 3)
+}
+
+func TestSettlement_Deploy_SameCodeHashTwoDeployers(t *testing.T) {
+	z := newDeployZenon(t)
+	payload := deployPayload(100)
+
+	startDeploy(t, z, g.User1.Address, deployCodeHash, 100)
+	sendChunks(t, z, g.User1.Address, deployCodeHash, payload, 0)
+	user1Record := expectDeployRecord(t, z, g.User1.Address, deployCodeHash)
+	expectCounter(t, z, 2)
+
+	startDeploy(t, z, g.User2.Address, deployCodeHash, 100)
+	expectCounter(t, z, 3)
+
+	after1 := expectDeployRecord(t, z, g.User1.Address, deployCodeHash)
+	after2 := expectDeployRecord(t, z, g.User2.Address, deployCodeHash)
+	if after1.StartHeight != user1Record.StartHeight {
+		t.Fatalf("expected the first deployer's start height to stay %d, got %d", user1Record.StartHeight, after1.StartHeight)
+	}
+	expectDeployChunk(t, z, g.User1.Address, deployCodeHash, after1.StartHeight, 0, types.NewHash(payload))
+	if after2.ReceivedCount != 0 {
+		t.Fatalf("expected ReceivedCount 0 for the second deployer, got %d", after2.ReceivedCount)
+	}
+	expectNoDeployChunk(t, z, g.User2.Address, deployCodeHash, after2.StartHeight, 0)
+	if after2.Deployer != g.User2.Address || after1.Deployer != g.User1.Address {
+		t.Fatalf("records carry the wrong deployer")
+	}
+}
+
+func TestSettlement_Deploy_PlasmaPricing(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	full := deployPayload(constants.MaxDeployChunkData)
+
+	start := z.InsertSendBlock(deployStartStep(user, deployDomain, deployCodeHash, 100, 1, nil), nil, mock.SkipVmChanges)
+	if start.BasePlasma != uint64(constants.EmbeddedSimplePlasma) {
+		t.Fatalf("expected start base plasma %d, got %d", uint64(constants.EmbeddedSimplePlasma), start.BasePlasma)
+	}
+	z.InsertNewMomentum()
+
+	chunk := z.InsertSendBlock(deployChunkStep(user, deployDomain, deployCodeHash, 0, full), nil, mock.SkipVmChanges)
+	want := uint64(constants.AccountBlockBasePlasma + constants.ABByteDataPlasma*len(chunk.Data))
+	if len(chunk.Data) != 15556 || chunk.BasePlasma != 1078808 || chunk.BasePlasma != want {
+		t.Fatalf("expected chunk base plasma 1078808 for 15556 bytes, got %d for %d bytes", chunk.BasePlasma, len(chunk.Data))
+	}
+	z.InsertNewMomentum()
+	stored, err := z.Chain().GetFrontierMomentumStore().GetAccountBlockByHash(chunk.Hash)
+	common.FailIfErr(t, err)
+	got, err := vm.CanonicalBasePlasma(z.Chain(), stored)
+	common.FailIfErr(t, err)
+	if got != chunk.BasePlasma {
+		t.Fatalf("expected canonical base plasma %d, got %d", chunk.BasePlasma, got)
+	}
+	z.InsertNewMomentum()
+}
+
+func TestSettlement_Deploy_ChunkSendsExhaustPlasma(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	full := deployPayload(constants.MaxDeployChunkData)
+
+	z.InsertNewMomentum()
+	for i := 0; i < 9; i++ {
+		z.InsertSendBlock(deployChunkStep(user, deployDomain, deployCodeHash, 0, full), nil, mock.SkipVmChanges)
+	}
+	z.InsertSendBlock(deployChunkStep(user, deployDomain, deployCodeHash, 0, full), constants.ErrNotEnoughPlasma, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertNewMomentum()
 }
