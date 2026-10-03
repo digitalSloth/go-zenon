@@ -67,6 +67,22 @@ const (
 			{"name":"domainId","type":"uint32"},
 			{"name":"targetContract","type":"hash"},
 			{"name":"plasmaLimit","type":"uint64"}]},
+		{"type":"function","name":"DeployContractStart","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"codeHash","type":"hash"},
+			{"name":"metadataHash","type":"hash"},
+			{"name":"totalSize","type":"uint64"},
+			{"name":"chunkCount","type":"uint32"},
+			{"name":"metadata","type":"bytes"}]},
+		{"type":"function","name":"DeployContractChunk","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"codeHash","type":"hash"},
+			{"name":"chunkIndex","type":"uint32"},
+			{"name":"chunkHash","type":"hash"},
+			{"name":"chunkData","type":"bytes"}]},
+		{"type":"function","name":"DeployContractFinalize","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"codeHash","type":"hash"}]},
 
 		{"type":"variable","name":"domainRecord","inputs":[
 			{"name":"domainClass","type":"uint8"},
@@ -144,9 +160,24 @@ const (
 			{"name":"metadataHash","type":"hash"},
 			{"name":"totalSize","type":"uint64"},
 			{"name":"chunkCount","type":"uint32"},
-			{"name":"deployer","type":"address"},
 			{"name":"startHeight","type":"uint64"},
-			{"name":"receivedChunks","type":"bytes"}
+			{"name":"receivedCount","type":"uint32"}
+		]},
+
+		{"type":"variable","name":"deployChunk","inputs":[
+			{"name":"chunkHash","type":"hash"}
+		]},
+
+		{"type":"variable","name":"deployStartQueueEntry","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"deployer","type":"address"},
+			{"name":"codeHash","type":"hash"},
+			{"name":"startHeight","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"deployStartQueueMeta","inputs":[
+			{"name":"head","type":"uint64"},
+			{"name":"tail","type":"uint64"}
 		]},
 
 		{"type":"variable","name":"executorSetMember","inputs":[
@@ -251,11 +282,9 @@ const (
 	SettlementPauseMethodName = "Pause"
 	// declared for Tickets 11+, not yet wired
 	SettlementCallL2MethodName = "CallL2"
-	// declared for Tickets 11+, not yet wired
-	SettlementDeployContractStartMethodName = "DeployContractStart"
-	// declared for Tickets 11+, not yet wired
-	SettlementDeployContractChunkMethodName = "DeployContractChunk"
-	// declared for Tickets 11+, not yet wired
+
+	SettlementDeployContractStartMethodName    = "DeployContractStart"
+	SettlementDeployContractChunkMethodName    = "DeployContractChunk"
 	SettlementDeployContractFinalizeMethodName = "DeployContractFinalize"
 	// declared for Tickets 11+, not yet wired
 	SettlementUpgradeContractMethodName = "UpgradeContract"
@@ -270,6 +299,9 @@ const (
 	releaseQueueEntryVariableName         = "releaseQueueEntry"
 	releaseQueueMetaVariableName          = "releaseQueueMeta"
 	deployRecordVariableName              = "deployRecord"
+	deployChunkVariableName               = "deployChunk"
+	deployStartQueueEntryVariableName     = "deployStartQueueEntry"
+	deployStartQueueMetaVariableName      = "deployStartQueueMeta"
 	executorSetMemberVariableName         = "executorSetMember"
 	peripheryConfigVariableName           = "peripheryConfig"
 	pendingFeeVariableName                = "pendingFee"
@@ -384,7 +416,7 @@ var (
 	conservationCountersPrefix   = []byte{0x07} // key: domainId ‖ assetId (32B)
 	releaseQueueEntryPrefix      = []byte{0x08} // key: domainId ‖ registrationIndex (u64 BE)
 	releaseQueueMetaPrefix       = []byte{0x09} // key: domainId
-	deployRecordPrefix           = []byte{0x0A} // key: domainId ‖ codeHash (32B)
+	deployRecordPrefix           = []byte{0x0A} // key: domainId ‖ deployer (20B) ‖ codeHash (32B)
 	processedOutboxPrefix        = []byte{0x0B} // key: outboxId (32B)
 	executorSetMemberPrefix      = []byte{0x0C} // ExecutorSetMember, key: hash(pillarName)
 	peripheryConfigKey           = []byte{0x0D} // PeripheryConfig, singleton
@@ -402,6 +434,9 @@ var (
 	pendingFeePrefix             = []byte{0x19} // key: epoch (u64 BE) ‖ hash(pillarName)
 	feeEpochPrefix               = []byte{0x1A} // pending-epoch queue, key: epoch (u64 BE)
 	feeCountersKey               = []byte{0x1B} // FeeCounters, singleton
+	deployChunkPrefix            = []byte{0x1C} // key: domainId ‖ deployer (20B) ‖ codeHash (32B) ‖ startHeight (u64 BE) ‖ chunkIndex (u32 BE)
+	deployStartQueueEntryPrefix  = []byte{0x1D} // key: queueIndex (u64 BE)
+	deployStartQueueMetaKey      = []byte{0x1E} // DeployStartQueueMeta, singleton
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -1022,21 +1057,22 @@ func DequeueRelease(context db.DB, domainId uint32) (*ReleaseQueueEntry, error) 
 
 type DeployRecordKey struct {
 	DomainId uint32
+	Deployer types.Address
 	CodeHash types.Hash
 }
 
 func (k *DeployRecordKey) Key() []byte {
-	return common.JoinBytes(deployRecordPrefix, uint32ToBytesBE(k.DomainId), k.CodeHash.Bytes())
+	return common.JoinBytes(deployRecordPrefix, uint32ToBytesBE(k.DomainId), k.Deployer.Bytes(), k.CodeHash.Bytes())
 }
 
 type DeployRecord struct {
 	DeployRecordKey
-	MetadataHash   types.Hash
-	TotalSize      uint64
-	ChunkCount     uint32
-	Deployer       types.Address
-	StartHeight    uint64
-	ReceivedChunks []byte
+	MetadataHash types.Hash
+	TotalSize    uint64
+	ChunkCount   uint32
+	StartHeight  uint64
+	// ReceivedCount is the number of chunk entries stored for this attempt.
+	ReceivedCount uint32
 }
 
 func (r *DeployRecord) Save(context db.DB) error {
@@ -1045,9 +1081,8 @@ func (r *DeployRecord) Save(context db.DB) error {
 		r.MetadataHash,
 		r.TotalSize,
 		r.ChunkCount,
-		r.Deployer,
 		r.StartHeight,
-		r.ReceivedChunks,
+		r.ReceivedCount,
 	)
 	if err != nil {
 		return err
@@ -1060,16 +1095,20 @@ func (r *DeployRecord) Delete(context db.DB) error {
 func isDeployRecordKey(key []byte) bool {
 	return len(key) > 0 && key[0] == deployRecordPrefix[0]
 }
-func unmarshalDeployRecordKey(key []byte) (uint32, types.Hash, error) {
+func unmarshalDeployRecordKey(key []byte) (uint32, types.Address, types.Hash, error) {
 	if !isDeployRecordKey(key) {
-		return 0, types.ZeroHash, errors.Errorf("invalid key! Not deploy record key")
+		return 0, types.Address{}, types.ZeroHash, errors.Errorf("invalid key! Not deploy record key")
 	}
 	domainId := bytesBEToUint32(key[1:5])
-	codeHash, err := types.BytesToHash(key[5 : 5+types.HashSize])
+	deployer, err := types.BytesToAddress(key[5 : 5+types.AddressSize])
 	if err != nil {
-		return 0, types.ZeroHash, err
+		return 0, types.Address{}, types.ZeroHash, err
 	}
-	return domainId, codeHash, nil
+	codeHash, err := types.BytesToHash(key[5+types.AddressSize : 5+types.AddressSize+types.HashSize])
+	if err != nil {
+		return 0, types.Address{}, types.ZeroHash, err
+	}
+	return domainId, deployer, codeHash, nil
 }
 func parseDeployRecord(key, data []byte) (*DeployRecord, error) {
 	if len(data) == 0 {
@@ -1079,21 +1118,226 @@ func parseDeployRecord(key, data []byte) (*DeployRecord, error) {
 	if err := ABISettlement.UnpackVariable(record, deployRecordVariableName, data); err != nil {
 		return nil, err
 	}
-	domainId, codeHash, err := unmarshalDeployRecordKey(key)
+	domainId, deployer, codeHash, err := unmarshalDeployRecordKey(key)
 	if err != nil {
 		return nil, err
 	}
 	record.DomainId = domainId
+	record.Deployer = deployer
 	record.CodeHash = codeHash
 	return record, nil
 }
-func GetDeployRecord(context db.DB, domainId uint32, codeHash types.Hash) (*DeployRecord, error) {
-	key := (&DeployRecordKey{DomainId: domainId, CodeHash: codeHash}).Key()
+func GetDeployRecord(context db.DB, domainId uint32, deployer types.Address, codeHash types.Hash) (*DeployRecord, error) {
+	key := (&DeployRecordKey{DomainId: domainId, Deployer: deployer, CodeHash: codeHash}).Key()
 	if data, err := context.Get(key); err != nil {
 		return nil, err
 	} else {
 		return parseDeployRecord(key, data)
 	}
+}
+
+// ============================================================================
+// Deploy chunk entries (one per received chunk of an attempt)
+// ============================================================================
+
+type DeployChunkKey struct {
+	DeployRecordKey
+	StartHeight uint64
+	ChunkIndex  uint32
+}
+
+func (k *DeployChunkKey) Key() []byte {
+	return common.JoinBytes(deployChunkPrefix, uint32ToBytesBE(k.DomainId), k.Deployer.Bytes(), k.CodeHash.Bytes(), uint64ToBytesBE(k.StartHeight), uint32ToBytesBE(k.ChunkIndex))
+}
+
+type DeployChunk struct {
+	DeployChunkKey
+	ChunkHash types.Hash
+}
+
+func (c *DeployChunk) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(deployChunkVariableName, c.ChunkHash)
+	if err != nil {
+		return err
+	}
+	return context.Put(c.Key(), data)
+}
+
+// GetDeployChunk returns constants.ErrDataNonExistent when the entry is
+// absent.
+func GetDeployChunk(context db.DB, key DeployChunkKey) (*DeployChunk, error) {
+	data, err := context.Get(key.Key())
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	}
+	chunk := new(DeployChunk)
+	if err := ABISettlement.UnpackVariable(chunk, deployChunkVariableName, data); err != nil {
+		return nil, err
+	}
+	chunk.DeployChunkKey = key
+	return chunk, nil
+}
+
+// DeleteDeployChunks deletes every chunk entry of the attempt (record,
+// startHeight). It collects the keys first and deletes after the iterator
+// is released.
+func DeleteDeployChunks(context db.DB, record DeployRecordKey, startHeight uint64) error {
+	prefix := common.JoinBytes(deployChunkPrefix, uint32ToBytesBE(record.DomainId), record.Deployer.Bytes(), record.CodeHash.Bytes(), uint64ToBytesBE(startHeight))
+	iterator := context.NewIterator(prefix)
+	keys := make([][]byte, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		keys = append(keys, append([]byte(nil), iterator.Key()...))
+	}
+	err := iterator.Error()
+	iterator.Release()
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := context.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ============================================================================
+// Deploy start queue (global FIFO of started attempts): entries + head/tail meta
+// ============================================================================
+
+type DeployStartQueueEntry struct {
+	Index       uint64 // queue position, from the key, not in the ABI value
+	DomainId    uint32
+	Deployer    types.Address
+	CodeHash    types.Hash
+	StartHeight uint64
+}
+
+func (e *DeployStartQueueEntry) key() []byte {
+	return common.JoinBytes(deployStartQueueEntryPrefix, uint64ToBytesBE(e.Index))
+}
+func (e *DeployStartQueueEntry) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		deployStartQueueEntryVariableName,
+		e.DomainId,
+		e.Deployer,
+		e.CodeHash,
+		e.StartHeight,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(e.key(), data)
+}
+func (e *DeployStartQueueEntry) Delete(context db.DB) error {
+	return context.Delete(e.key())
+}
+func getDeployStartQueueEntry(context db.DB, index uint64) (*DeployStartQueueEntry, error) {
+	key := common.JoinBytes(deployStartQueueEntryPrefix, uint64ToBytesBE(index))
+	data, err := context.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	}
+	entry := new(DeployStartQueueEntry)
+	if err := ABISettlement.UnpackVariable(entry, deployStartQueueEntryVariableName, data); err != nil {
+		return nil, err
+	}
+	entry.Index = index
+	return entry, nil
+}
+
+type DeployStartQueueMeta struct {
+	Head uint64
+	Tail uint64
+}
+
+func (m *DeployStartQueueMeta) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		deployStartQueueMetaVariableName,
+		m.Head,
+		m.Tail,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(deployStartQueueMetaKey, data)
+}
+
+// GetDeployStartQueueMeta returns {0, 0} when no meta is stored.
+func GetDeployStartQueueMeta(context db.DB) (*DeployStartQueueMeta, error) {
+	data, err := context.Get(deployStartQueueMetaKey)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return &DeployStartQueueMeta{}, nil
+	}
+	meta := new(DeployStartQueueMeta)
+	if err := ABISettlement.UnpackVariable(meta, deployStartQueueMetaVariableName, data); err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+// EnqueueDeployStart appends entry to the tail of the start queue and
+// advances the tail cursor.
+func EnqueueDeployStart(context db.DB, entry *DeployStartQueueEntry) error {
+	meta, err := GetDeployStartQueueMeta(context)
+	if err != nil {
+		return err
+	}
+	entry.Index = meta.Tail
+	if err := entry.Save(context); err != nil {
+		return err
+	}
+	meta.Tail++
+	return meta.Save(context)
+}
+
+// PeekDeployStart returns the entry at the head of the start queue without
+// removing it. It reads the meta and then the head entry only, and never
+// iterates the entry prefix. Returns constants.ErrDataNonExistent when the
+// queue is empty.
+func PeekDeployStart(context db.DB) (*DeployStartQueueEntry, error) {
+	meta, err := GetDeployStartQueueMeta(context)
+	if err != nil {
+		return nil, err
+	}
+	if meta.Head >= meta.Tail {
+		return nil, constants.ErrDataNonExistent
+	}
+	return getDeployStartQueueEntry(context, meta.Head)
+}
+
+// DequeueDeployStart removes and returns the entry at the head of the start
+// queue, advancing the head cursor. Returns constants.ErrDataNonExistent
+// when the queue is empty.
+func DequeueDeployStart(context db.DB) (*DeployStartQueueEntry, error) {
+	entry, err := PeekDeployStart(context)
+	if err != nil {
+		return nil, err
+	}
+	if err := entry.Delete(context); err != nil {
+		return nil, err
+	}
+	meta, err := GetDeployStartQueueMeta(context)
+	if err != nil {
+		return nil, err
+	}
+	meta.Head++
+	if err := meta.Save(context); err != nil {
+		return nil, err
+	}
+	return entry, nil
 }
 
 // ============================================================================

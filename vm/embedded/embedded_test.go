@@ -116,6 +116,9 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"WithdrawQsr", "id":"b3d658fd", "signature":"WithdrawQsr()"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"CollectReward", "id":"af43d3f0", "signature":"CollectReward()"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"DeployContractChunk", "id":"8c11554b", "signature":"DeployContractChunk(uint32,hash,uint32,hash,bytes)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"DeployContractFinalize", "id":"7ff95ed3", "signature":"DeployContractFinalize(uint32,hash)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"DeployContractStart", "id":"f8153550", "signature":"DeployContractStart(uint32,hash,hash,uint64,uint32,bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Deposit", "id":"967793fa", "signature":"Deposit(uint32,hash,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"InitiateEscapeHatch", "id":"fed58790", "signature":"InitiateEscapeHatch(uint32)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Pause", "id":"ce23af21", "signature":"Pause(uint32,bool,uint8,bool)"}
