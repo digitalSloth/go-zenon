@@ -284,10 +284,10 @@ var (
 
 	// ErrNotImplemented rejects a Settlement method that has no
 	// implementation yet.
-	ErrNotImplemented        = errors.New("not implemented")
-	ErrSettlementRelayPaused = errors.New("settlement relay paused")
-	ErrSettlementFeeGuard    = errors.New("settlement fee guard violated")
-
+	ErrNotImplemented                 = errors.New("not implemented")
+	ErrSettlementRelayPaused          = errors.New("settlement relay paused")
+	ErrSettlementSubmitPaused         = errors.New("settlement submit paused")
+	ErrSettlementFeeGuard             = errors.New("settlement fee guard violated")
 	ErrSettlementConservationViolated = errors.New("settlement conservation invariant violated")
 	ErrSettlementInvalidAssetFlow     = errors.New("settlement asset flow summary invalid")
 	ErrSettlementInputIndexExhausted  = errors.New("settlement input index exhausted")

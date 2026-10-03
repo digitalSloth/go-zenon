@@ -4,31 +4,45 @@ import "math/big"
 
 // Fixed Settlement protocol constants (sizes in bytes unless noted).
 const (
-	MaxOnChainCommitmentSize = 1024 * 15 // 15 KiB
-	MaxCallPayload           = 1024 * 8  // 8 KiB
-	MaxReturnData            = 1024 * 4  // 4 KiB
-	MaxExecutionResult       = 1024 * 32 // 32 KiB
-	MaxBatchInputs           = 64
-	MaxDAChunkSize           = 1024 * 16  // 16 KiB (off-chain DA only)
-	MaxDeployChunkData       = 1024 * 15  // 15 KiB
-	MaxCodeSize              = 1024 * 256 // 256 KiB (pre-instrumentation)
-	MaxChunkCount            = 18
-	DeploymentExpiryWindow   = 2880 // momentum heights
-	MaxContractMetadataSize  = 256
-	MaxMemory                = 64 * 65536 // 4 MiB (64 WASM pages)
-	MaxStackDepth            = 512
-	MaxInstrumentedCodeSize  = 1024 * 1024 // 1 MiB post-instrumentation ceiling
-	MaxStateKeySize          = 32
-	MaxStateValueSize        = 1024 * 16 // 16 KiB
-	MaxEventsPerExecution    = 64
-	MaxEventDataSize         = 1024 // 1 KiB
-	MaxTopicsPerEvent        = 4
-	MaxOutboxPerExecution    = 32
-	MaxOutboxPayloadSize     = 1024 * 8 // 8 KiB
-	MaxAssetsPerBatch        = 16
-	MaxWithdrawalsPerUpdate  = 16
-	MaxDeploySweepPerStart   = 2  // expired deploy starts swept per accepted start
-	FeeBurnShare             = 30 // percent of each settled fee burned
+	MaxOnChainCommitmentSize       = 1024 * 15 // 15 KiB
+	MaxCallPayload                 = 1024 * 8  // 8 KiB
+	MaxReturnData                  = 1024 * 4  // 4 KiB
+	MaxExecutionResult             = 1024 * 32 // 32 KiB
+	MaxBatchInputs                 = 64
+	MaxDAChunkSize                 = 1024 * 16  // 16 KiB (off-chain DA only)
+	MaxDeployChunkData             = 1024 * 15  // 15 KiB
+	MaxCodeSize                    = 1024 * 256 // 256 KiB (pre-instrumentation)
+	MaxChunkCount                  = 18
+	DeploymentExpiryWindow         = 2880 // momentum heights
+	MaxContractMetadataSize        = 256
+	MaxMemory                      = 64 * 65536 // 4 MiB (64 WASM pages)
+	MaxStackDepth                  = 512
+	MaxInstrumentedCodeSize        = 1024 * 1024 // 1 MiB post-instrumentation ceiling
+	MaxStateKeySize                = 32
+	MaxStateValueSize              = 1024 * 16 // 16 KiB
+	MaxEventsPerExecution          = 64
+	MaxEventDataSize               = 1024 // 1 KiB
+	MaxTopicsPerEvent              = 4
+	MaxOutboxPerExecution          = 32
+	MaxOutboxPayloadSize           = 1024 * 8 // 8 KiB
+	MaxAssetsPerBatch              = 16
+	MaxWithdrawalsPerUpdate        = 16
+	MaxDeploySweepPerStart         = 2  // expired deploy starts swept per accepted start
+	MaxRecordSweepBatchesPerSubmit = 2  // finalized batches whose input records one accepted SubmitBatch deletes
+	FeeBurnShare                   = 30 // percent of each settled fee burned
+)
+
+// Phase-1 batch commitment version fields, in wire order.
+const (
+	SettlementProtocolVersion        uint16 = 1
+	SettlementRuntimeProfileVersion  uint16 = 1
+	SettlementMeteringVersion        uint16 = 1
+	SettlementSerializationVersion   uint16 = 1
+	SettlementStateDiffVersion       uint16 = 1
+	SettlementExecutionResultVersion uint16 = 1
+	SettlementReceiptVersion         uint16 = 1
+	SettlementOutboxVersion          uint16 = 1
+	SettlementDAModeVersion          uint16 = 1
 )
 
 // Hard-bound holders for pre-mainnet parameters. Concrete ceilings are

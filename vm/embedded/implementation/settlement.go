@@ -1146,8 +1146,10 @@ func getInputDomain(context vm_context.AccountVmContext, domainId uint32) (*defi
 // admitInput assigns the next global input index to an accepted input of
 // domainId. It saves the assigned-index record {assetId, amount, fee} under
 // (domainId, index), adds a positive amount to the (domainId, assetId)
-// cumulative deposit total, and advances the global counter. Callers run
-// it only after every receive check has passed. A nil amount or fee is
+// cumulative deposit total, and advances the global counter. It also
+// records the global index under the next ordinal of domainId's input
+// sequence and advances the domain counter. Callers run it only after
+// every receive check has passed. A nil amount or fee is
 // zero; an input without a deposit passes types.ZeroHash and nil.
 func admitInput(storage db.DB, domainId uint32, assetId types.Hash, amount, fee *big.Int) error {
 	counter, err := definition.GetReceivedInputCounter(storage)
@@ -1168,6 +1170,19 @@ func admitInput(storage db.DB, domainId uint32, assetId types.Hash, amount, fee 
 		Fee:                    fee,
 	}
 	if err := record.Save(storage); err != nil {
+		return err
+	}
+
+	domainCounter, err := definition.GetDomainInputCounter(storage, domainId)
+	if err != nil {
+		return err
+	}
+	ordinal := &definition.DomainInputOrdinal{DomainId: domainId, Ordinal: domainCounter.Count, GlobalInputIndex: counter.Count}
+	if err := ordinal.Save(storage); err != nil {
+		return err
+	}
+	domainCounter.Count++
+	if err := domainCounter.Save(storage); err != nil {
 		return err
 	}
 
@@ -1355,6 +1370,306 @@ func (p *SettlementDepositMethod) ReceiveBlock(context vm_context.AccountVmConte
 		return nil, err
 	}
 	return nil, nil
+}
+
+// ============================================================================
+// SubmitBatch
+// ============================================================================
+
+// commitmentVersions holds the nine version fields of a batch commitment
+// in wire order.
+var commitmentVersions = [9]uint16{
+	constants.SettlementProtocolVersion, constants.SettlementRuntimeProfileVersion,
+	constants.SettlementMeteringVersion, constants.SettlementSerializationVersion,
+	constants.SettlementStateDiffVersion, constants.SettlementExecutionResultVersion,
+	constants.SettlementReceiptVersion, constants.SettlementOutboxVersion,
+	constants.SettlementDAModeVersion,
+}
+
+const (
+	commitmentVersionBlockLen = 18
+	commitmentMinLen          = 303 // fixed fields plus the summary's u32 count
+	commitmentSummaryOffset   = 299
+)
+
+// decodeBatchCommitment decodes a big-endian batch commitment: nine u16
+// version fields, domainId (u32), batchId, firstInputSeq, lastInputSeq
+// (u64), seven 32-byte hashes (preStateRoot, postStateRoot, inputRoot,
+// receiptRoot, eventRoot, outboxRoot, DAHash), DAMode (u8), executorId
+// (20 bytes), submittedAtHeight (u64), the asset flow summary and a u32
+// proofData length that must be 0. It returns the entry, the executorId
+// and the wire submittedAtHeight, and checks neither of the last two.
+func decodeBatchCommitment(b []byte) (*definition.BatchEntry, types.Address, uint64, error) {
+	var executor types.Address
+	if len(b) < commitmentVersionBlockLen {
+		return nil, executor, 0, constants.ErrForbiddenParam
+	}
+	for i, want := range commitmentVersions {
+		if binary.BigEndian.Uint16(b[2*i:2*i+2]) != want {
+			return nil, executor, 0, constants.ErrForbiddenParam
+		}
+	}
+	if len(b) < commitmentMinLen {
+		return nil, executor, 0, constants.ErrForbiddenParam
+	}
+
+	entry := &definition.BatchEntry{
+		BatchEntryKey: definition.BatchEntryKey{
+			DomainId: binary.BigEndian.Uint32(b[18:22]),
+			BatchId:  binary.BigEndian.Uint64(b[22:30]),
+		},
+		ProtocolVersion: binary.BigEndian.Uint16(b[0:2]),
+		FirstInputSeq:   binary.BigEndian.Uint64(b[30:38]),
+		LastInputSeq:    binary.BigEndian.Uint64(b[38:46]),
+		DaMode:          b[270],
+		ProofData:       []byte{},
+	}
+	hashes := []*types.Hash{
+		&entry.PreStateRoot, &entry.PostStateRoot, &entry.InputRoot, &entry.ReceiptRoot,
+		&entry.EventRoot, &entry.OutboxRoot, &entry.DaHash,
+	}
+	for i, h := range hashes {
+		copy(h[:], b[46+32*i:78+32*i])
+	}
+	copy(executor[:], b[271:291])
+	submittedAtHeight := binary.BigEndian.Uint64(b[291:299])
+
+	n := uint64(binary.BigEndian.Uint32(b[commitmentSummaryOffset:commitmentMinLen]))
+	if n > constants.MaxAssetsPerBatch || uint64(len(b)-commitmentMinLen) < n*assetFlowEntrySize {
+		return nil, executor, 0, constants.ErrSettlementInvalidAssetFlow
+	}
+	summaryEnd := commitmentMinLen + int(n)*assetFlowEntrySize
+	entry.AssetFlowSummary = b[commitmentSummaryOffset:summaryEnd]
+	if _, err := decodeAssetFlowSummary(entry.AssetFlowSummary); err != nil {
+		return nil, executor, 0, err
+	}
+
+	rest := b[summaryEnd:]
+	if len(rest) != 4 || binary.BigEndian.Uint32(rest) != 0 {
+		return nil, executor, 0, constants.ErrForbiddenParam
+	}
+	return entry, executor, submittedAtHeight, nil
+}
+
+// collectBatchInputs returns the domain's assigned-index records from
+// ordinal startOrdinal through the one whose global index is
+// lastInputSeq. The first must have global index firstInputSeq. It
+// returns ErrForbiddenParam when the range is not a contiguous run of
+// the domain's received inputs or holds more than MaxBatchInputs.
+func collectBatchInputs(storage db.DB, domainId uint32, startOrdinal, firstInputSeq, lastInputSeq uint64) ([]*definition.AssignedIndexRecord, error) {
+	counter, err := definition.GetDomainInputCounter(storage, domainId)
+	if err != nil {
+		return nil, err
+	}
+
+	inputs := make([]*definition.AssignedIndexRecord, 0, constants.MaxBatchInputs)
+	for i := uint64(0); i < constants.MaxBatchInputs; i++ {
+		ordinal := startOrdinal + i
+		if ordinal >= counter.Count {
+			return nil, constants.ErrForbiddenParam
+		}
+		o, err := definition.GetDomainInputOrdinal(storage, domainId, ordinal)
+		if err != nil {
+			return nil, err
+		}
+		g := o.GlobalInputIndex
+		if (i == 0 && g != firstInputSeq) || g > lastInputSeq {
+			return nil, constants.ErrForbiddenParam
+		}
+		record, err := definition.GetAssignedIndexRecord(storage, domainId, g)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, record)
+		if g == lastInputSeq {
+			return inputs, nil
+		}
+	}
+	return nil, constants.ErrForbiddenParam
+}
+
+// sweepFinalizedBatchRecords deletes the assigned-index records and
+// ordinal entries of at most constants.MaxRecordSweepBatchesPerSubmit
+// finalized batches, starting at cursor.RecordsSweptThrough. It stops at
+// the first batch that is not finalized at height. It advances the sweep
+// fields of cursor and does not save it.
+func sweepFinalizedBatchRecords(storage db.DB, height uint64, cursor *definition.InputSequenceCursor) error {
+	for i := 0; i < constants.MaxRecordSweepBatchesPerSubmit && cursor.RecordsSweptThrough < cursor.NextBatchId; i++ {
+		batch, err := definition.GetBatchEntry(storage, cursor.DomainId, cursor.RecordsSweptThrough)
+		if err != nil {
+			return err
+		}
+		if !batch.IsFinalized(height) {
+			return nil
+		}
+		for {
+			o, err := definition.GetDomainInputOrdinal(storage, cursor.DomainId, cursor.SweptInputCount)
+			if err != nil {
+				return err
+			}
+			record := &definition.AssignedIndexRecord{AssignedIndexRecordKey: definition.AssignedIndexRecordKey{DomainId: cursor.DomainId, GlobalInputIndex: o.GlobalInputIndex}}
+			if err := record.Delete(storage); err != nil {
+				return err
+			}
+			if err := o.Delete(storage); err != nil {
+				return err
+			}
+			cursor.SweptInputCount++
+			if o.GlobalInputIndex == batch.LastInputSeq {
+				break
+			}
+		}
+		cursor.RecordsSweptThrough++
+	}
+	return nil
+}
+
+// acceptBatch validates entry against the domain state and, when every
+// check passes, stores it, advances the domain cursor, sweeps the input
+// records of finalized batches and accrues the batch fees. The checks
+// write nothing, so a rejected batch changes no state.
+func acceptBatch(storage db.DB, height uint64, activePillars []*definition.PillarInfo, caller types.Address, entry *definition.BatchEntry) error {
+	paused, err := definition.IsSubmitPaused(storage, entry.DomainId)
+	if err != nil {
+		return err
+	}
+	if paused {
+		return constants.ErrSettlementSubmitPaused
+	}
+
+	if _, err := definition.GetDomainRecord(storage, entry.DomainId); err == constants.ErrDataNonExistent {
+		return constants.ErrForbiddenParam
+	} else if err != nil {
+		return err
+	}
+	config, err := definition.GetDomainConfig(storage, entry.DomainId)
+	if err == constants.ErrDataNonExistent {
+		return constants.ErrForbiddenParam
+	} else if err != nil {
+		return err
+	}
+
+	pillar, err := activeExecutorPillar(storage, activePillars, caller)
+	if err != nil {
+		return err
+	}
+
+	modes, err := definition.GetApprovedDAModeSet(storage, entry.DomainId)
+	if err != nil {
+		return err
+	}
+	if !bytes.Contains(modes.Modes, []byte{entry.DaMode}) {
+		return constants.ErrForbiddenParam
+	}
+
+	cursor, err := definition.GetInputSequenceCursor(storage, entry.DomainId)
+	if err != nil {
+		return err
+	}
+	if entry.BatchId != cursor.NextBatchId {
+		return constants.ErrForbiddenParam
+	}
+	expectedPreState := types.ZeroHash
+	if cursor.NextBatchId != 0 {
+		previous, err := definition.GetBatchEntry(storage, entry.DomainId, cursor.NextBatchId-1)
+		if err != nil {
+			return err
+		}
+		expectedPreState = previous.PostStateRoot
+	}
+	if entry.PreStateRoot != expectedPreState {
+		return constants.ErrForbiddenParam
+	}
+
+	inputs, err := collectBatchInputs(storage, entry.DomainId, cursor.ConsumedInputCount, entry.FirstInputSeq, entry.LastInputSeq)
+	if err != nil {
+		return err
+	}
+	if err := verifyAssetFlowDeposits(entry.AssetFlowSummary, inputs); err != nil {
+		return err
+	}
+
+	entry.ExecutorPillar = pillar
+	entry.SubmittedAtHeight = height
+	entry.FinalizeAtHeight = height + config.WithdrawalDelay
+	entry.State = definition.BatchStateSubmitted
+	if err := entry.Save(storage); err != nil {
+		return err
+	}
+
+	cursor.ConsumedInputCount += uint64(len(inputs))
+	cursor.NextBatchId++
+	if err := sweepFinalizedBatchRecords(storage, height, cursor); err != nil {
+		return err
+	}
+	if err := cursor.Save(storage); err != nil {
+		return err
+	}
+	return accrueBatchFees(storage, entry, inputs)
+}
+
+type SettlementSubmitBatchParam struct {
+	Commitment []byte
+}
+
+// SettlementSubmitBatchMethod accepts a batch commitment from the active
+// executor of an entitled pillar.
+type SettlementSubmitBatchMethod struct{ MethodName string }
+
+func (p *SettlementSubmitBatchMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementSubmitBatchMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementSubmitBatchParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if len(param.Commitment) > constants.MaxOnChainCommitmentSize {
+		return constants.ErrForbiddenParam
+	}
+	_, executor, submittedAtHeight, err := decodeBatchCommitment(param.Commitment)
+	if err != nil {
+		return err
+	}
+	if executor != block.Address {
+		return constants.ErrPermissionDenied
+	}
+	if submittedAtHeight != 0 {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.Commitment)
+	return err
+}
+func (p *SettlementSubmitBatchMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementSubmitBatchParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+	entry, _, _, err := decodeBatchCommitment(param.Commitment)
+	if err != nil {
+		return nil, err
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	activePillars, err := context.MomentumStore().GetActivePillars()
+	if err != nil {
+		return nil, err
+	}
+	return nil, acceptBatch(context.Storage(), frontier.Height, activePillars, sendBlock.Address, entry)
 }
 
 // ============================================================================

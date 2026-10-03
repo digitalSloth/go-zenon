@@ -67,6 +67,8 @@ const (
 			{"name":"domainId","type":"uint32"},
 			{"name":"targetContract","type":"hash"},
 			{"name":"plasmaLimit","type":"uint64"}]},
+		{"type":"function","name":"SubmitBatch","inputs":[
+			{"name":"commitment","type":"bytes"}]},
 		{"type":"function","name":"DeployContractStart","inputs":[
 			{"name":"domainId","type":"uint32"},
 			{"name":"codeHash","type":"hash"},
@@ -121,7 +123,18 @@ const (
 		]},
 
 		{"type":"variable","name":"inputSequenceCursor","inputs":[
-			{"name":"lastConsumedInputSeq","type":"uint64"}
+			{"name":"consumedInputCount","type":"uint64"},
+			{"name":"nextBatchId","type":"uint64"},
+			{"name":"recordsSweptThrough","type":"uint64"},
+			{"name":"sweptInputCount","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"domainInputCounter","inputs":[
+			{"name":"count","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"domainInputOrdinal","inputs":[
+			{"name":"globalInputIndex","type":"uint64"}
 		]},
 
 		{"type":"variable","name":"receivedInputCounter","inputs":[
@@ -274,8 +287,7 @@ const (
 	SettlementSetAssetConfigMethodName     = "SetAssetConfig"
 	SettlementSetApprovedDAModesMethodName = "SetApprovedDAModes"
 	SettlementDepositMethodName            = "Deposit"
-	// declared for Tickets 11+, not yet wired
-	SettlementSubmitBatchMethodName = "SubmitBatch"
+	SettlementSubmitBatchMethodName        = "SubmitBatch"
 	// declared for Tickets 11+, not yet wired
 	SettlementRelayMessageMethodName = "RelayMessage"
 
@@ -293,6 +305,8 @@ const (
 	batchEntryVariableName                = "batchEntry"
 	inputSequenceCursorVariableName       = "inputSequenceCursor"
 	receivedInputCounterVariableName      = "receivedInputCounter"
+	domainInputCounterVariableName        = "domainInputCounter"
+	domainInputOrdinalVariableName        = "domainInputOrdinal"
 	assignedIndexRecordVariableName       = "assignedIndexRecord"
 	cumulativeDepositTotalVariableName    = "cumulativeDepositTotal"
 	conservationCountersVariableName      = "conservationCounters"
@@ -379,7 +393,9 @@ const (
 	DAModeBestEffort uint8 = 0
 )
 
-// BatchEntry.state
+// BatchEntry.state. The stored value is the acceptance state: SubmitBatch
+// writes BatchStateSubmitted and no code writes BatchStateFinalized.
+// BatchEntry.IsFinalized(height) is the authority on finality.
 const (
 	BatchStateSubmitted uint8 = iota
 	BatchStateFinalized
@@ -437,6 +453,8 @@ var (
 	deployChunkPrefix            = []byte{0x1C} // key: domainId ‖ deployer (20B) ‖ codeHash (32B) ‖ startHeight (u64 BE) ‖ chunkIndex (u32 BE)
 	deployStartQueueEntryPrefix  = []byte{0x1D} // key: queueIndex (u64 BE)
 	deployStartQueueMetaKey      = []byte{0x1E} // DeployStartQueueMeta, singleton
+	domainInputCounterPrefix     = []byte{0x1F} // key: domainId (u32 BE)
+	domainInputOrdinalPrefix     = []byte{0x20} // key: domainId ‖ ordinal (u64 BE)
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -575,7 +593,14 @@ type BatchEntry struct {
 	FinalizeAtHeight  uint64
 	AssetFlowSummary  []byte
 	ProofData         []byte
-	State             uint8
+	// State is the acceptance state. No code writes BatchStateFinalized;
+	// IsFinalized(height) is authoritative.
+	State uint8
+}
+
+// IsFinalized reports whether the batch is FINALIZED at height.
+func (b *BatchEntry) IsFinalized(height uint64) bool {
+	return height >= b.FinalizeAtHeight
 }
 
 func (b *BatchEntry) Save(context db.DB) error {
@@ -648,9 +673,14 @@ func GetBatchEntry(context db.DB, domainId uint32, batchId uint64) (*BatchEntry,
 // Input-sequence cursor (per domain)
 // ============================================================================
 
+// InputSequenceCursor reads as all zero when absent; NextBatchId == 0
+// means the domain has no accepted batch.
 type InputSequenceCursor struct {
-	DomainId             uint32
-	LastConsumedInputSeq uint64
+	DomainId            uint32
+	ConsumedInputCount  uint64 // domain ordinal of the earliest unconsumed input
+	NextBatchId         uint64 // batchId the next accepted batch must carry
+	RecordsSweptThrough uint64 // batches whose input records have been deleted
+	SweptInputCount     uint64 // ordinals whose input records have been deleted
 }
 
 func getInputSequenceCursorKey(domainId uint32) []byte {
@@ -659,7 +689,10 @@ func getInputSequenceCursorKey(domainId uint32) []byte {
 func (c *InputSequenceCursor) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
 		inputSequenceCursorVariableName,
-		c.LastConsumedInputSeq,
+		c.ConsumedInputCount,
+		c.NextBatchId,
+		c.RecordsSweptThrough,
+		c.SweptInputCount,
 	)
 	if err != nil {
 		return err
@@ -671,7 +704,7 @@ func GetInputSequenceCursor(context db.DB, domainId uint32) (*InputSequenceCurso
 	if data, err := context.Get(key); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
-		return &InputSequenceCursor{DomainId: domainId, LastConsumedInputSeq: 0}, nil
+		return &InputSequenceCursor{DomainId: domainId}, nil
 	} else {
 		cursor := new(InputSequenceCursor)
 		if err := ABISettlement.UnpackVariable(cursor, inputSequenceCursorVariableName, data); err != nil {
@@ -680,6 +713,79 @@ func GetInputSequenceCursor(context db.DB, domainId uint32) (*InputSequenceCurso
 		cursor.DomainId = domainId
 		return cursor, nil
 	}
+}
+
+// ============================================================================
+// Per-domain input counter and ordinal index
+// ============================================================================
+
+type DomainInputCounter struct {
+	DomainId uint32
+	Count    uint64
+}
+
+func getDomainInputCounterKey(domainId uint32) []byte {
+	return common.JoinBytes(domainInputCounterPrefix, uint32ToBytesBE(domainId))
+}
+func (c *DomainInputCounter) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		domainInputCounterVariableName,
+		c.Count,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getDomainInputCounterKey(c.DomainId), data)
+}
+func GetDomainInputCounter(context db.DB, domainId uint32) (*DomainInputCounter, error) {
+	if data, err := context.Get(getDomainInputCounterKey(domainId)); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return &DomainInputCounter{DomainId: domainId}, nil
+	} else {
+		counter := new(DomainInputCounter)
+		if err := ABISettlement.UnpackVariable(counter, domainInputCounterVariableName, data); err != nil {
+			return nil, err
+		}
+		counter.DomainId = domainId
+		return counter, nil
+	}
+}
+
+// DomainInputOrdinal maps the ordinal of a domain's input to its global
+// input index.
+type DomainInputOrdinal struct {
+	DomainId         uint32
+	Ordinal          uint64
+	GlobalInputIndex uint64
+}
+
+func (o *DomainInputOrdinal) key() []byte {
+	return common.JoinBytes(domainInputOrdinalPrefix, uint32ToBytesBE(o.DomainId), uint64ToBytesBE(o.Ordinal))
+}
+func (o *DomainInputOrdinal) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		domainInputOrdinalVariableName,
+		o.GlobalInputIndex,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(o.key(), data)
+}
+func (o *DomainInputOrdinal) Delete(context db.DB) error {
+	return context.Delete(o.key())
+}
+func GetDomainInputOrdinal(context db.DB, domainId uint32, ordinal uint64) (*DomainInputOrdinal, error) {
+	o := &DomainInputOrdinal{DomainId: domainId, Ordinal: ordinal}
+	if data, err := context.Get(o.key()); err != nil {
+		return nil, err
+	} else if len(data) == 0 {
+		return nil, constants.ErrDataNonExistent
+	} else if err := ABISettlement.UnpackVariable(o, domainInputOrdinalVariableName, data); err != nil {
+		return nil, err
+	}
+	return o, nil
 }
 
 // ============================================================================
@@ -749,6 +855,9 @@ func (r *AssignedIndexRecord) Save(context db.DB) error {
 		return err
 	}
 	return context.Put(r.Key(), data)
+}
+func (r *AssignedIndexRecord) Delete(context db.DB) error {
+	return context.Delete(r.Key())
 }
 
 func isAssignedIndexRecordKey(key []byte) bool {
