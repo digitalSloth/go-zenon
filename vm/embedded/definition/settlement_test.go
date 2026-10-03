@@ -384,6 +384,8 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"deployChunk":            deployChunkPrefix,
 		"deployStartQueueEntry":  deployStartQueueEntryPrefix,
 		"deployStartQueueMeta":   deployStartQueueMetaKey,
+		"domainInputCounter":     domainInputCounterPrefix,
+		"domainInputOrdinal":     domainInputOrdinalPrefix,
 	}
 
 	seen := make(map[byte]string, len(prefixes))
@@ -407,11 +409,11 @@ func TestInputSequenceCursor_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if zero.LastConsumedInputSeq != 0 {
-		t.Fatalf("expected zero-default cursor, got %v", zero.LastConsumedInputSeq)
+	if *zero != (InputSequenceCursor{DomainId: domainId}) {
+		t.Fatalf("expected zero-default cursor, got %+v", zero)
 	}
 
-	cursor := &InputSequenceCursor{DomainId: domainId, LastConsumedInputSeq: 77}
+	cursor := &InputSequenceCursor{DomainId: domainId, ConsumedInputCount: 77, NextBatchId: 5, RecordsSweptThrough: 3, SweptInputCount: 40}
 	if err := cursor.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
@@ -419,8 +421,96 @@ func TestInputSequenceCursor_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.LastConsumedInputSeq != 77 {
-		t.Fatalf("cursor mismatch: got %v want 77", got.LastConsumedInputSeq)
+	if *got != *cursor {
+		t.Fatalf("cursor mismatch: got %+v want %+v", got, cursor)
+	}
+}
+
+func TestDomainInputCounter_RoundTrip(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	zero, err := GetDomainInputCounter(memDb, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero.Count != 0 {
+		t.Fatalf("expected zero-default counter, got %d", zero.Count)
+	}
+
+	if err := (&DomainInputCounter{DomainId: 3, Count: 9}).Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetDomainInputCounter(memDb, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Count != 9 {
+		t.Fatalf("counter mismatch: got %d want 9", got.Count)
+	}
+	other, err := GetDomainInputCounter(memDb, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Count != 0 {
+		t.Fatalf("expected domain 4 untouched, got %d", other.Count)
+	}
+}
+
+func TestDomainInputOrdinal_RoundTripAndDelete(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	if _, err := GetDomainInputOrdinal(memDb, 3, 0); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent, got %v", err)
+	}
+
+	ordinal := &DomainInputOrdinal{DomainId: 3, Ordinal: 2, GlobalInputIndex: 41}
+	if err := ordinal.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetDomainInputOrdinal(memDb, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != *ordinal {
+		t.Fatalf("ordinal mismatch: got %+v want %+v", got, ordinal)
+	}
+	if _, err := GetDomainInputOrdinal(memDb, 4, 2); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected other domain absent, got %v", err)
+	}
+
+	if err := ordinal.Delete(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetDomainInputOrdinal(memDb, 3, 2); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent after delete, got %v", err)
+	}
+}
+
+func TestAssignedIndexRecord_Delete(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	record := &AssignedIndexRecord{
+		AssignedIndexRecordKey: AssignedIndexRecordKey{DomainId: 2, GlobalInputIndex: 8},
+		AssetId:                hashFromByte(0x11),
+		Amount:                 big.NewInt(5),
+	}
+	if err := record.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if err := record.Delete(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GetAssignedIndexRecord(memDb, 2, 8); err != constants.ErrDataNonExistent {
+		t.Fatalf("expected ErrDataNonExistent after delete, got %v", err)
+	}
+}
+
+func TestBatchEntry_IsFinalized(t *testing.T) {
+	batch := &BatchEntry{FinalizeAtHeight: 100}
+	if batch.IsFinalized(99) {
+		t.Fatal("expected not finalized at FinalizeAtHeight-1")
+	}
+	if !batch.IsFinalized(100) || !batch.IsFinalized(101) {
+		t.Fatal("expected finalized from FinalizeAtHeight")
 	}
 }
 
