@@ -1356,3 +1356,356 @@ func (p *SettlementDepositMethod) ReceiveBlock(context vm_context.AccountVmConte
 	}
 	return nil, nil
 }
+
+// ============================================================================
+// Deploy
+// ============================================================================
+
+// getLiveDeployRecord returns the pending deploy record of
+// (domainId, deployer, codeHash). A record is live for exactly
+// constants.DeploymentExpiryWindow heights from its start height. An
+// absent or expired record returns ErrDataNonExistent.
+func getLiveDeployRecord(storage db.DB, domainId uint32, deployer types.Address, codeHash types.Hash, height uint64) (*definition.DeployRecord, error) {
+	record, err := definition.GetDeployRecord(storage, domainId, deployer, codeHash)
+	if err != nil {
+		return nil, err
+	}
+	if deployExpired(record.StartHeight, height) {
+		return nil, constants.ErrDataNonExistent
+	}
+	return record, nil
+}
+
+// deployExpired reports whether an attempt started at startHeight is
+// expired at height.
+func deployExpired(startHeight, height uint64) bool {
+	return height >= startHeight+constants.DeploymentExpiryWindow
+}
+
+// consumeDeployRecord returns and deletes the live deploy record of
+// (domainId, caller, codeHash). It deletes the header and every chunk
+// entry of the attempt. It returns ErrForbiddenParam, and keeps both,
+// while a chunk is missing.
+func consumeDeployRecord(storage db.DB, domainId uint32, caller types.Address, codeHash types.Hash, height uint64) (*definition.DeployRecord, error) {
+	record, err := getLiveDeployRecord(storage, domainId, caller, codeHash, height)
+	if err != nil {
+		return nil, err
+	}
+	if record.ReceivedCount != record.ChunkCount {
+		return nil, constants.ErrForbiddenParam
+	}
+	if err := record.Delete(storage); err != nil {
+		return nil, err
+	}
+	if err := definition.DeleteDeployChunks(storage, record.DeployRecordKey, record.StartHeight); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+// sweepExpiredDeployStarts pops at most constants.MaxDeploySweepPerStart
+// expired entries from the head of the start queue. For each it deletes
+// the attempt's chunk entries and, when the stored header belongs to the
+// same attempt, the header. It stops at the first unexpired entry.
+func sweepExpiredDeployStarts(storage db.DB, height uint64) error {
+	for i := 0; i < constants.MaxDeploySweepPerStart; i++ {
+		entry, err := definition.PeekDeployStart(storage)
+		if err == constants.ErrDataNonExistent {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if !deployExpired(entry.StartHeight, height) {
+			return nil
+		}
+		key := definition.DeployRecordKey{DomainId: entry.DomainId, Deployer: entry.Deployer, CodeHash: entry.CodeHash}
+		if err := definition.DeleteDeployChunks(storage, key, entry.StartHeight); err != nil {
+			return err
+		}
+		record, err := definition.GetDeployRecord(storage, entry.DomainId, entry.Deployer, entry.CodeHash)
+		if err == nil {
+			if record.StartHeight == entry.StartHeight {
+				if err := record.Delete(storage); err != nil {
+					return err
+				}
+			}
+		} else if err != constants.ErrDataNonExistent {
+			return err
+		}
+		if _, err := definition.DequeueDeployStart(storage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// chargeBytecodeFee checks that sendBlock pays exactly
+// totalSize * ZnnPerByteOfBytecode in ZNN, adds the fee to
+// TotalFeesCollected and returns it. It never touches the conservation
+// counters. It returns ErrDataNonExistent when no Periphery config is
+// stored.
+func chargeBytecodeFee(storage db.DB, totalSize uint64, sendBlock *nom.AccountBlock) (*big.Int, error) {
+	config, err := definition.GetPeripheryConfig(storage)
+	if err != nil {
+		return nil, err
+	}
+	fee := new(big.Int).Mul(new(big.Int).SetUint64(totalSize), config.ZnnPerByteOfBytecode)
+	if sendBlock.TokenStandard != types.ZnnTokenStandard || sendBlock.Amount.Cmp(fee) != 0 {
+		return nil, constants.ErrInvalidTokenOrAmount
+	}
+	counters, err := definition.GetFeeCounters(storage)
+	if err != nil {
+		return nil, err
+	}
+	counters.TotalFeesCollected = new(big.Int).Add(counters.TotalFeesCollected, fee)
+	if err := counters.Save(storage); err != nil {
+		return nil, err
+	}
+	return fee, nil
+}
+
+type SettlementDeployStartParam struct {
+	DomainId     uint32
+	CodeHash     types.Hash
+	MetadataHash types.Hash
+	TotalSize    uint64
+	ChunkCount   uint32
+	Metadata     []byte
+}
+
+type SettlementDeployChunkParam struct {
+	DomainId   uint32
+	CodeHash   types.Hash
+	ChunkIndex uint32
+	ChunkHash  types.Hash
+	ChunkData  []byte
+}
+
+type SettlementDeployFinalizeParam struct {
+	DomainId uint32
+	CodeHash types.Hash
+}
+
+// SettlementDeployContractStartMethod first sweeps expired starts, then
+// opens a pending deploy record for the sender.
+type SettlementDeployContractStartMethod struct{ MethodName string }
+
+func (p *SettlementDeployContractStartMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementDeployContractStartMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementDeployStartParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if len(param.Metadata) > constants.MaxContractMetadataSize || types.NewHash(param.Metadata) != param.MetadataHash {
+		return constants.ErrForbiddenParam
+	}
+	if param.TotalSize == 0 || param.TotalSize > constants.MaxCodeSize {
+		return constants.ErrForbiddenParam
+	}
+	if uint64(param.ChunkCount) != (param.TotalSize+constants.MaxDeployChunkData-1)/constants.MaxDeployChunkData ||
+		param.ChunkCount > constants.MaxChunkCount {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.CodeHash, param.MetadataHash, param.TotalSize, param.ChunkCount, param.Metadata)
+	return err
+}
+func (p *SettlementDeployContractStartMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementDeployStartParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	storage := context.Storage()
+	if _, err := getLiveDeployRecord(storage, param.DomainId, sendBlock.Address, param.CodeHash, frontier.Height); err == nil {
+		return nil, constants.ErrForbiddenParam
+	} else if err != constants.ErrDataNonExistent {
+		return nil, err
+	}
+
+	if err := sweepExpiredDeployStarts(storage, frontier.Height); err != nil {
+		return nil, err
+	}
+
+	record := &definition.DeployRecord{
+		DeployRecordKey: definition.DeployRecordKey{DomainId: param.DomainId, Deployer: sendBlock.Address, CodeHash: param.CodeHash},
+		MetadataHash:    param.MetadataHash,
+		TotalSize:       param.TotalSize,
+		ChunkCount:      param.ChunkCount,
+		StartHeight:     frontier.Height,
+		ReceivedCount:   0,
+	}
+	if err := record.Save(storage); err != nil {
+		return nil, err
+	}
+	if err := definition.EnqueueDeployStart(storage, &definition.DeployStartQueueEntry{
+		DomainId:    param.DomainId,
+		Deployer:    sendBlock.Address,
+		CodeHash:    param.CodeHash,
+		StartHeight: frontier.Height,
+	}); err != nil {
+		return nil, err
+	}
+	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, nil); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// SettlementDeployContractChunkMethod stores one chunk-hash entry for the
+// sender's pending deploy record.
+type SettlementDeployContractChunkMethod struct{ MethodName string }
+
+func (p *SettlementDeployContractChunkMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementDeployContractChunkMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementDeployChunkParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if len(param.ChunkData) == 0 || len(param.ChunkData) > constants.MaxDeployChunkData || types.NewHash(param.ChunkData) != param.ChunkHash {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.CodeHash, param.ChunkIndex, param.ChunkHash, param.ChunkData)
+	return err
+}
+func (p *SettlementDeployContractChunkMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementDeployChunkParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	storage := context.Storage()
+	record, err := getLiveDeployRecord(storage, param.DomainId, sendBlock.Address, param.CodeHash, frontier.Height)
+	if err != nil {
+		return nil, err
+	}
+
+	if param.ChunkIndex >= record.ChunkCount {
+		return nil, constants.ErrForbiddenParam
+	}
+	expected := uint64(constants.MaxDeployChunkData)
+	if param.ChunkIndex == record.ChunkCount-1 {
+		expected = record.TotalSize - uint64(record.ChunkCount-1)*constants.MaxDeployChunkData
+	}
+	if uint64(len(param.ChunkData)) != expected {
+		return nil, constants.ErrForbiddenParam
+	}
+
+	chunkKey := definition.DeployChunkKey{DeployRecordKey: record.DeployRecordKey, StartHeight: record.StartHeight, ChunkIndex: param.ChunkIndex}
+	if _, err := definition.GetDeployChunk(storage, chunkKey); err == nil {
+		return nil, constants.ErrForbiddenParam
+	} else if err != constants.ErrDataNonExistent {
+		return nil, err
+	}
+	if err := (&definition.DeployChunk{DeployChunkKey: chunkKey, ChunkHash: param.ChunkHash}).Save(storage); err != nil {
+		return nil, err
+	}
+	record.ReceivedCount++
+	if err := record.Save(storage); err != nil {
+		return nil, err
+	}
+	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, nil); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// SettlementDeployContractFinalizeMethod consumes the sender's complete
+// deploy record and charges the bytecode fee.
+type SettlementDeployContractFinalizeMethod struct{ MethodName string }
+
+func (p *SettlementDeployContractFinalizeMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementDeployContractFinalizeMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementDeployFinalizeParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.TokenStandard != types.ZnnTokenStandard || block.Amount.Sign() <= 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.CodeHash)
+	return err
+}
+
+// ReceiveBlock deletes the deploy record before it charges the fee. When
+// the fee check or admission fails, the VM rollback restores the record
+// and discards every write.
+func (p *SettlementDeployContractFinalizeMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementDeployFinalizeParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	storage := context.Storage()
+	record, err := consumeDeployRecord(storage, param.DomainId, sendBlock.Address, param.CodeHash, frontier.Height)
+	if err != nil {
+		return nil, err
+	}
+	fee, err := chargeBytecodeFee(storage, record.TotalSize, sendBlock)
+	if err != nil {
+		return nil, err
+	}
+	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, fee); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}

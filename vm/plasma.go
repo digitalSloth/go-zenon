@@ -143,6 +143,7 @@ func CanonicalBasePlasma(c chain.Chain, block *nom.AccountBlock) (uint64, error)
 }
 
 // GetBasePlasmaForAccountBlock calculates the smallest plasma required for an account block.
+// A send to the Settlement contract costs the higher of the method price and the plain-send data price.
 func GetBasePlasmaForAccountBlock(context vm_context.AccountVmContext, block *nom.AccountBlock) (uint64, error) {
 	if types.IsEmbeddedAddress(block.Address) {
 		return 0, nil
@@ -165,14 +166,23 @@ func GetBasePlasmaForAccountBlock(context vm_context.AccountVmContext, block *no
 		} else if err != nil {
 			return 0, err
 		} else {
-			tier, err := method.GetPlasma(&constants.AlphanetPlasmaTable)
+			plasma, err := method.GetPlasma(&constants.AlphanetPlasmaTable)
 			if err != nil {
 				return 0, err
 			}
 			if context.IsDynamicPlasmaSporkEnforced() {
-				return EmbeddedSendBasePlasma(tier, len(block.Data))
+				plasma, err = EmbeddedSendBasePlasma(plasma, len(block.Data))
+				if err != nil {
+					return 0, err
+				}
 			}
-			return tier, nil
+			if block.ToAddress == types.SettlementContract {
+				dataPlasma := uint64(len(block.Data)*constants.ABByteDataPlasma + constants.AccountBlockBasePlasma)
+				if dataPlasma > plasma {
+					return dataPlasma, nil
+				}
+			}
+			return plasma, nil
 		}
 	}
 }
