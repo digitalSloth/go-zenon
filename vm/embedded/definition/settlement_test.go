@@ -324,30 +324,30 @@ func TestDeployRecord_RoundTrip(t *testing.T) {
 	domainId := uint32(9)
 	codeHash := hashFromByte(0x70)
 
-	if _, err := GetDeployRecord(memDb, domainId, codeHash); err != constants.ErrDataNonExistent {
+	if _, err := GetDeployRecord(memDb, domainId, addressFromByte(0x72), codeHash); err != constants.ErrDataNonExistent {
 		t.Fatalf("expected ErrDataNonExistent, got %v", err)
 	}
 
 	record := &DeployRecord{
-		DeployRecordKey: DeployRecordKey{DomainId: domainId, CodeHash: codeHash},
+		DeployRecordKey: DeployRecordKey{DomainId: domainId, Deployer: addressFromByte(0x72), CodeHash: codeHash},
 		MetadataHash:    hashFromByte(0x71),
 		TotalSize:       123456,
 		ChunkCount:      9,
-		Deployer:        addressFromByte(0x72),
 		StartHeight:     555,
-		ReceivedChunks:  []byte{},
+		ReceivedCount:   4,
 	}
 	if err := record.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := GetDeployRecord(memDb, domainId, codeHash)
+	got, err := GetDeployRecord(memDb, domainId, addressFromByte(0x72), codeHash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.CodeHash != codeHash || got.MetadataHash != record.MetadataHash ||
 		got.TotalSize != record.TotalSize || got.ChunkCount != record.ChunkCount ||
-		got.Deployer != record.Deployer || got.StartHeight != record.StartHeight {
+		got.Deployer != record.Deployer || got.StartHeight != record.StartHeight ||
+		got.ReceivedCount != record.ReceivedCount {
 		t.Fatalf("deploy record mismatch: got %+v want %+v", got, record)
 	}
 }
@@ -381,6 +381,9 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"assetConfig":            assetConfigPrefix,
 		"approvedDAModeSet":      approvedDAModeSetPrefix,
 		"domainCounter":          domainCounterKey,
+		"deployChunk":            deployChunkPrefix,
+		"deployStartQueueEntry":  deployStartQueueEntryPrefix,
+		"deployStartQueueMeta":   deployStartQueueMetaKey,
 	}
 
 	seen := make(map[byte]string, len(prefixes))

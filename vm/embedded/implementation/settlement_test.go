@@ -13,6 +13,7 @@ import (
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm/constants"
 	"github.com/zenon-network/go-zenon/vm/embedded/definition"
+	"github.com/zenon-network/go-zenon/vm/vm_context"
 )
 
 var feeEpochLen = uint64(constants.MomentumsPerEpoch)
@@ -706,4 +707,381 @@ func TestVerifyAssetFlowDeposits_Rejects(t *testing.T) {
 			t.Fatalf("%s: expected ErrSettlementInvalidAssetFlow, got %v", c.name, err)
 		}
 	}
+}
+
+// ============================================================================
+// Deploy records and bytecode fee
+// ============================================================================
+
+func deployTestHash(b byte) types.Hash {
+	var h types.Hash
+	for i := range h {
+		h[i] = b
+	}
+	return h
+}
+
+// seedDeployRecord stores a header with chunkCount chunks and one chunk
+// entry for each index in filled.
+func seedDeployRecord(t *testing.T, storage db.DB, deployer types.Address, startHeight uint64, chunkCount uint32, filled ...int) *definition.DeployRecord {
+	t.Helper()
+	record := &definition.DeployRecord{
+		DeployRecordKey: definition.DeployRecordKey{DomainId: 1, Deployer: deployer, CodeHash: deployTestHash(0xC0)},
+		MetadataHash:    deployTestHash(0xD0),
+		TotalSize:       100,
+		ChunkCount:      chunkCount,
+		StartHeight:     startHeight,
+		ReceivedCount:   uint32(len(filled)),
+	}
+	common.FailIfErr(t, record.Save(storage))
+	for _, i := range filled {
+		chunk := &definition.DeployChunk{
+			DeployChunkKey: definition.DeployChunkKey{DeployRecordKey: record.DeployRecordKey, StartHeight: startHeight, ChunkIndex: uint32(i)},
+			ChunkHash:      deployTestHash(byte(0x10 + i)),
+		}
+		common.FailIfErr(t, chunk.Save(storage))
+	}
+	return record
+}
+
+func expectErr(t *testing.T, label string, got, want error) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s: got error %v want %v", label, got, want)
+	}
+}
+
+func TestGetLiveDeployRecord_AbsentAndOtherDeployer(t *testing.T) {
+	storage := feeTestStorage()
+	codeHash := deployTestHash(0xC0)
+	_, err := getLiveDeployRecord(storage, 1, feeTestAddress(0x0A), codeHash, 10)
+	expectErr(t, "absent", err, constants.ErrDataNonExistent)
+
+	seedDeployRecord(t, storage, feeTestAddress(0x0A), 10, 1)
+	record, err := getLiveDeployRecord(storage, 1, feeTestAddress(0x0A), codeHash, 10)
+	common.FailIfErr(t, err)
+	if record.StartHeight != 10 {
+		t.Fatalf("unexpected record %+v", record)
+	}
+	_, err = getLiveDeployRecord(storage, 1, feeTestAddress(0x0B), codeHash, 10)
+	expectErr(t, "other deployer", err, constants.ErrDataNonExistent)
+	_, err = getLiveDeployRecord(storage, 2, feeTestAddress(0x0A), codeHash, 10)
+	expectErr(t, "other domain", err, constants.ErrDataNonExistent)
+}
+
+func TestGetLiveDeployRecord_ExpiryBoundary(t *testing.T) {
+	storage := feeTestStorage()
+	deployer := feeTestAddress(0x0A)
+	seedDeployRecord(t, storage, deployer, 100, 1)
+	codeHash := deployTestHash(0xC0)
+
+	_, err := getLiveDeployRecord(storage, 1, deployer, codeHash, 100+constants.DeploymentExpiryWindow-1)
+	common.FailIfErr(t, err)
+	_, err = getLiveDeployRecord(storage, 1, deployer, codeHash, 100+constants.DeploymentExpiryWindow)
+	expectErr(t, "at expiry height", err, constants.ErrDataNonExistent)
+	_, err = getLiveDeployRecord(storage, 1, deployer, codeHash, 100+constants.DeploymentExpiryWindow+5)
+	expectErr(t, "after expiry height", err, constants.ErrDataNonExistent)
+}
+
+func TestConsumeDeployRecord_Rejections(t *testing.T) {
+	storage := feeTestStorage()
+	deployer := feeTestAddress(0x0A)
+	codeHash := deployTestHash(0xC0)
+	seedDeployRecord(t, storage, deployer, 10, 3, 0, 2)
+
+	_, err := consumeDeployRecord(storage, 1, feeTestAddress(0x0B), codeHash, 11)
+	expectErr(t, "other caller", err, constants.ErrDataNonExistent)
+	_, err = consumeDeployRecord(storage, 1, deployer, codeHash, 11)
+	expectErr(t, "missing chunk", err, constants.ErrForbiddenParam)
+	_, err = consumeDeployRecord(storage, 1, deployer, codeHash, 10+constants.DeploymentExpiryWindow)
+	expectErr(t, "expired", err, constants.ErrDataNonExistent)
+
+	record, err := definition.GetDeployRecord(storage, 1, deployer, codeHash)
+	common.FailIfErr(t, err)
+	if record.StartHeight != 10 {
+		t.Fatalf("expected the record to stay stored, got %+v", record)
+	}
+}
+
+func TestConsumeDeployRecord_ReturnsAndDeletes(t *testing.T) {
+	storage := feeTestStorage()
+	deployer := feeTestAddress(0x0A)
+	codeHash := deployTestHash(0xC0)
+	seedDeployRecord(t, storage, deployer, 10, 3, 0, 1, 2)
+
+	record, err := consumeDeployRecord(storage, 1, deployer, codeHash, 11)
+	common.FailIfErr(t, err)
+	if record.ChunkCount != 3 || record.TotalSize != 100 || record.Deployer != deployer {
+		t.Fatalf("unexpected record %+v", record)
+	}
+	_, err = definition.GetDeployRecord(storage, 1, deployer, codeHash)
+	expectErr(t, "after consume", err, constants.ErrDataNonExistent)
+	_, err = consumeDeployRecord(storage, 1, deployer, codeHash, 11)
+	expectErr(t, "second consume", err, constants.ErrDataNonExistent)
+	for i := uint32(0); i < 3; i++ {
+		_, err = definition.GetDeployChunk(storage, definition.DeployChunkKey{DeployRecordKey: record.DeployRecordKey, StartHeight: 10, ChunkIndex: i})
+		expectErr(t, "chunk after consume", err, constants.ErrDataNonExistent)
+	}
+}
+
+func enqueueSeed(t *testing.T, storage db.DB, record *definition.DeployRecord) {
+	t.Helper()
+	common.FailIfErr(t, definition.EnqueueDeployStart(storage, &definition.DeployStartQueueEntry{
+		DomainId:    record.DomainId,
+		Deployer:    record.Deployer,
+		CodeHash:    record.CodeHash,
+		StartHeight: record.StartHeight,
+	}))
+}
+
+func hasDeployRecord(t *testing.T, storage db.DB, deployer types.Address) bool {
+	t.Helper()
+	_, err := definition.GetDeployRecord(storage, 1, deployer, deployTestHash(0xC0))
+	if err == constants.ErrDataNonExistent {
+		return false
+	}
+	common.FailIfErr(t, err)
+	return true
+}
+
+func hasDeployChunk(t *testing.T, storage db.DB, deployer types.Address, startHeight uint64, index uint32) bool {
+	t.Helper()
+	key := definition.DeployChunkKey{
+		DeployRecordKey: definition.DeployRecordKey{DomainId: 1, Deployer: deployer, CodeHash: deployTestHash(0xC0)},
+		StartHeight:     startHeight,
+		ChunkIndex:      index,
+	}
+	_, err := definition.GetDeployChunk(storage, key)
+	if err == constants.ErrDataNonExistent {
+		return false
+	}
+	common.FailIfErr(t, err)
+	return true
+}
+
+func queueHead(t *testing.T, storage db.DB) (uint64, uint64) {
+	t.Helper()
+	meta, err := definition.GetDeployStartQueueMeta(storage)
+	common.FailIfErr(t, err)
+	return meta.Head, meta.Tail
+}
+
+func TestSweepExpiredDeployStarts_DrainsTwoPerStart(t *testing.T) {
+	storage := feeTestStorage()
+	w := uint64(constants.DeploymentExpiryWindow)
+	for i := 0; i < 5; i++ {
+		enqueueSeed(t, storage, seedDeployRecord(t, storage, feeTestAddress(byte(0x0A+i)), 10, 2, 0))
+	}
+	for n := 1; n <= 3; n++ {
+		common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w))
+		head, _ := queueHead(t, storage)
+		want := 2 * n
+		if want > 5 {
+			want = 5
+		}
+		if head != uint64(want) {
+			t.Fatalf("call %d: head %d want %d", n, head, want)
+		}
+		for i := 0; i < 5; i++ {
+			deployer := feeTestAddress(byte(0x0A + i))
+			swept := i < want
+			if hasDeployRecord(t, storage, deployer) == swept || hasDeployChunk(t, storage, deployer, 10, 0) == swept {
+				t.Fatalf("call %d: deployer %d swept=%v mismatch", n, i, swept)
+			}
+		}
+	}
+	common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w))
+	head, tail := queueHead(t, storage)
+	if head != 5 || tail != 5 {
+		t.Fatalf("head %d tail %d, want 5 5", head, tail)
+	}
+	_, err := definition.PeekDeployStart(storage)
+	expectErr(t, "peek drained", err, constants.ErrDataNonExistent)
+}
+
+func TestSweepExpiredDeployStarts_StopsAtFirstUnexpired(t *testing.T) {
+	storage := feeTestStorage()
+	w := uint64(constants.DeploymentExpiryWindow)
+	a, b := feeTestAddress(0x0A), feeTestAddress(0x0B)
+	enqueueSeed(t, storage, seedDeployRecord(t, storage, a, 10, 1))
+	enqueueSeed(t, storage, seedDeployRecord(t, storage, b, 11, 1))
+
+	common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w-1))
+	if head, _ := queueHead(t, storage); head != 0 || !hasDeployRecord(t, storage, a) {
+		t.Fatalf("expected nothing removed, head %d", head)
+	}
+	common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w))
+	if head, _ := queueHead(t, storage); head != 1 {
+		t.Fatalf("head %d want 1", head)
+	}
+	if hasDeployRecord(t, storage, a) || !hasDeployRecord(t, storage, b) {
+		t.Fatal("expected only A removed")
+	}
+}
+
+func TestSweepExpiredDeployStarts_ConsumedRecordLeavesNothing(t *testing.T) {
+	storage := feeTestStorage()
+	w := uint64(constants.DeploymentExpiryWindow)
+	a := feeTestAddress(0x0A)
+	enqueueSeed(t, storage, seedDeployRecord(t, storage, a, 10, 2, 0, 1))
+	_, err := consumeDeployRecord(storage, 1, a, deployTestHash(0xC0), 11)
+	common.FailIfErr(t, err)
+
+	common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w))
+	if head, _ := queueHead(t, storage); head != 1 {
+		t.Fatalf("head %d want 1", head)
+	}
+	if hasDeployRecord(t, storage, a) || hasDeployChunk(t, storage, a, 10, 0) || hasDeployChunk(t, storage, a, 10, 1) {
+		t.Fatal("expected no header and no chunk entries")
+	}
+}
+
+func TestSweepExpiredDeployStarts_KeepsRestartedRecord(t *testing.T) {
+	storage := feeTestStorage()
+	w := uint64(constants.DeploymentExpiryWindow)
+	a := feeTestAddress(0x0A)
+	enqueueSeed(t, storage, seedDeployRecord(t, storage, a, 10, 2, 0))
+	enqueueSeed(t, storage, seedDeployRecord(t, storage, a, 10+w, 2, 0))
+
+	common.FailIfErr(t, sweepExpiredDeployStarts(storage, 10+w))
+	if head, _ := queueHead(t, storage); head != 1 {
+		t.Fatalf("head %d want 1", head)
+	}
+	record, err := definition.GetDeployRecord(storage, 1, a, deployTestHash(0xC0))
+	common.FailIfErr(t, err)
+	if record.StartHeight != 10+w || record.ReceivedCount != 1 {
+		t.Fatalf("unexpected record %+v", record)
+	}
+	if !hasDeployChunk(t, storage, a, 10+w, 0) || hasDeployChunk(t, storage, a, 10, 0) {
+		t.Fatal("expected the restart's chunk kept and the predecessor's chunk gone")
+	}
+}
+
+// deployStartContext serves a deploy start receive from a storage and a
+// frontier height; the receive reads nothing else from the context.
+type deployStartContext struct {
+	vm_context.AccountVmContext
+	storage db.DB
+	height  uint64
+}
+
+func (c *deployStartContext) Storage() db.DB { return c.storage }
+func (c *deployStartContext) GetFrontierMomentum() (*nom.Momentum, error) {
+	return &nom.Momentum{Height: c.height}, nil
+}
+
+// A start whose input index is exhausted fails after its sweep has run.
+// The receive runs on a snapshot, which the caller drops when the receive
+// fails, so none of the sweep's writes reach the base storage.
+func TestDeployContractStart_ExhaustedInputIndexLeavesSweepUnapplied(t *testing.T) {
+	base := feeTestStorage()
+	w := uint64(constants.DeploymentExpiryWindow)
+	deployers := []types.Address{feeTestAddress(0x0A), feeTestAddress(0x0B), feeTestAddress(0x0C)}
+	for _, deployer := range deployers {
+		enqueueSeed(t, base, seedDeployRecord(t, base, deployer, 10, 2, 0, 1))
+	}
+	domain := &definition.DomainRecord{DomainRecordKey: definition.DomainRecordKey{DomainId: 1}, DomainClass: 1}
+	common.FailIfErr(t, domain.Save(base))
+	common.FailIfErr(t, (&definition.ReceivedInputCounter{Count: math.MaxUint64}).Save(base))
+
+	starter := feeTestAddress(0x0D)
+	method := &SettlementDeployContractStartMethod{MethodName: definition.SettlementDeployContractStartMethodName}
+	data, err := definition.ABISettlement.PackMethod(method.MethodName,
+		uint32(1), deployTestHash(0xC0), types.NewHash(nil), uint64(100), uint32(1), []byte(nil))
+	common.FailIfErr(t, err)
+	send := &nom.AccountBlock{Address: starter, Amount: big.NewInt(0), Data: data}
+
+	attempt := db.DisableNotFound(base.Snapshot())
+	_, err = method.ReceiveBlock(&deployStartContext{storage: attempt, height: 10 + w}, send)
+	expectErr(t, "exhausted start", err, constants.ErrSettlementInputIndexExhausted)
+
+	if head, tail := queueHead(t, attempt); head != 2 || tail != 4 {
+		t.Fatalf("expected the attempt to have swept two entries and queued its own (head 2 tail 4), got head %d tail %d", head, tail)
+	}
+	if hasDeployRecord(t, attempt, deployers[0]) || hasDeployRecord(t, attempt, deployers[1]) {
+		t.Fatal("expected the attempt to have swept the two oldest headers")
+	}
+
+	if head, tail := queueHead(t, base); head != 0 || tail != 3 {
+		t.Fatalf("expected the queue meta unchanged (head 0 tail 3), got head %d tail %d", head, tail)
+	}
+	for i, deployer := range deployers {
+		if !hasDeployRecord(t, base, deployer) {
+			t.Fatalf("deployer %d: header missing after the rejected start", i)
+		}
+		for chunk := uint32(0); chunk < 2; chunk++ {
+			if !hasDeployChunk(t, base, deployer, 10, chunk) {
+				t.Fatalf("deployer %d: chunk %d missing after the rejected start", i, chunk)
+			}
+		}
+	}
+	probe := db.DisableNotFound(base.Snapshot())
+	for index, deployer := range deployers {
+		entry, err := definition.DequeueDeployStart(probe)
+		common.FailIfErr(t, err)
+		if entry.Deployer != deployer || entry.StartHeight != 10 {
+			t.Fatalf("queue entry %d changed: %+v", index, entry)
+		}
+	}
+	if hasDeployRecord(t, base, starter) {
+		t.Fatal("rejected start left a header behind")
+	}
+	counter, err := definition.GetReceivedInputCounter(base)
+	common.FailIfErr(t, err)
+	if counter.Count != math.MaxUint64 {
+		t.Fatalf("expected the counter unchanged, got %d", counter.Count)
+	}
+}
+
+func feeBlock(zts types.ZenonTokenStandard, amount int64) *nom.AccountBlock {
+	return &nom.AccountBlock{TokenStandard: zts, Amount: big.NewInt(amount)}
+}
+
+func collectedOf(t *testing.T, storage db.DB) *big.Int {
+	t.Helper()
+	counters, err := definition.GetFeeCounters(storage)
+	common.FailIfErr(t, err)
+	return counters.TotalFeesCollected
+}
+
+func TestChargeBytecodeFee_NoPeripheryConfig(t *testing.T) {
+	storage := feeTestStorage()
+	_, err := chargeBytecodeFee(storage, 100, feeBlock(types.ZnnTokenStandard, 100))
+	expectErr(t, "no config", err, constants.ErrDataNonExistent)
+	expectBig(t, "collected", collectedOf(t, storage), 0)
+}
+
+func TestChargeBytecodeFee_RejectsWrongTokenOrAmount(t *testing.T) {
+	storage := feeTestStorage()
+	common.FailIfErr(t, (&definition.PeripheryConfig{ZnnPerByteOfBytecode: big.NewInt(3), ZnnPerByteOfState: big.NewInt(1)}).Save(storage))
+	// fee = 100 * 3 = 300
+	for _, tc := range []struct {
+		name string
+		blk  *nom.AccountBlock
+	}{
+		{"qsr right amount", feeBlock(types.QsrTokenStandard, 300)},
+		{"znn one short", feeBlock(types.ZnnTokenStandard, 299)},
+		{"znn one over", feeBlock(types.ZnnTokenStandard, 301)},
+		{"znn zero", feeBlock(types.ZnnTokenStandard, 0)},
+	} {
+		_, err := chargeBytecodeFee(storage, 100, tc.blk)
+		expectErr(t, tc.name, err, constants.ErrInvalidTokenOrAmount)
+		expectBig(t, tc.name+" collected", collectedOf(t, storage), 0)
+	}
+}
+
+func TestChargeBytecodeFee_ExactFeeIsCollected(t *testing.T) {
+	storage := feeTestStorage()
+	common.FailIfErr(t, (&definition.PeripheryConfig{ZnnPerByteOfBytecode: big.NewInt(3), ZnnPerByteOfState: big.NewInt(1)}).Save(storage))
+	seedCollected(t, storage, 50)
+
+	fee, err := chargeBytecodeFee(storage, 100, feeBlock(types.ZnnTokenStandard, 300))
+	common.FailIfErr(t, err)
+	expectBig(t, "fee", fee, 300)
+	expectBig(t, "collected", collectedOf(t, storage), 350)
+
+	fee, err = chargeBytecodeFee(storage, 1, feeBlock(types.ZnnTokenStandard, 3))
+	common.FailIfErr(t, err)
+	expectBig(t, "second fee", fee, 3)
+	expectBig(t, "second collected", collectedOf(t, storage), 353)
 }
