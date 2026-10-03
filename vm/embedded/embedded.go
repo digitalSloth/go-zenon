@@ -84,6 +84,7 @@ func applySettlementDiffs(contracts map[types.Address]*embeddedImplementation) {
 			cabi.SettlementPauseMethodName:                  &implementation.SettlementPauseMethod{MethodName: cabi.SettlementPauseMethodName},
 			cabi.SettlementInitiateEscapeHatchMethodName:    &implementation.SettlementInitiateEscapeHatchMethod{MethodName: cabi.SettlementInitiateEscapeHatchMethodName},
 			cabi.SettlementDepositMethodName:                &implementation.SettlementDepositMethod{MethodName: cabi.SettlementDepositMethodName},
+			cabi.SettlementSubmitBatchMethodName:            &implementation.SettlementSubmitBatchMethod{MethodName: cabi.SettlementSubmitBatchMethodName},
 			cabi.SettlementDeployContractStartMethodName:    &implementation.SettlementDeployContractStartMethod{MethodName: cabi.SettlementDeployContractStartMethodName},
 			cabi.SettlementDeployContractChunkMethodName:    &implementation.SettlementDeployContractChunkMethod{MethodName: cabi.SettlementDeployContractChunkMethodName},
 			cabi.SettlementDeployContractFinalizeMethodName: &implementation.SettlementDeployContractFinalizeMethod{MethodName: cabi.SettlementDeployContractFinalizeMethodName},

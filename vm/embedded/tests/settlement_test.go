@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"math/big"
 	"strings"
@@ -1954,4 +1955,113 @@ func TestSettlement_Deploy_ChunkSendsExhaustPlasma(t *testing.T) {
 	z.InsertSendBlock(deployChunkStep(user, deployDomain, deployCodeHash, 0, full), constants.ErrNotEnoughPlasma, mock.SkipVmChanges)
 	z.InsertNewMomentum()
 	z.InsertNewMomentum()
+}
+
+// ============================================================================
+// SubmitBatch
+// ============================================================================
+
+// batchCommitment encodes a commitment with every version field 1, the
+// wire height 0 and the given asset flow summary.
+func batchCommitment(domainId uint32, batchId, first, last uint64, pre, post types.Hash, executor types.Address, summary []byte) []byte {
+	var out []byte
+	for i := 0; i < 9; i++ {
+		out = binary.BigEndian.AppendUint16(out, 1)
+	}
+	out = binary.BigEndian.AppendUint32(out, domainId)
+	out = binary.BigEndian.AppendUint64(out, batchId)
+	out = binary.BigEndian.AppendUint64(out, first)
+	out = binary.BigEndian.AppendUint64(out, last)
+	out = append(out, pre.Bytes()...)
+	out = append(out, post.Bytes()...)
+	for i := 0; i < 5; i++ {
+		out = append(out, hashFromByteForTest(byte(0x30+i)).Bytes()...)
+	}
+	out = append(out, 0)
+	out = append(out, executor.Bytes()...)
+	out = binary.BigEndian.AppendUint64(out, 0)
+	out = append(out, summary...)
+	return binary.BigEndian.AppendUint32(out, 0)
+}
+
+func znnDepositSummary(amount int64) []byte {
+	out := binary.BigEndian.AppendUint32(nil, 1)
+	out = append(out, assetIdFor(types.ZnnTokenStandard).Bytes()...)
+	for _, v := range []int64{amount, 0} {
+		var word [32]byte
+		big.NewInt(v).FillBytes(word[:])
+		out = append(out, word[:]...)
+	}
+	return out
+}
+
+func submitBatchStep(from types.Address, commitment []byte) *nom.AccountBlock {
+	return settlementStep(from, definition.SettlementSubmitBatchMethodName, commitment)
+}
+
+func registerExecutorFully(t *testing.T, z mock.MockZenon, pillar string, executor types.Address) {
+	t.Helper()
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, pillar, executor), nil)
+	advanceMomentums(t, z, constants.MinAdministratorDelay)
+	settlementCall(t, z, registerExecutorStep(g.User5.Address, pillar, executor), nil)
+}
+
+func TestSettlement_SubmitBatch_AcceptanceAndChaining(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	constants.MinAdministratorDelay = 10
+	savedMin := constants.WithdrawalDelayMin
+	constants.WithdrawalDelayMin = 10
+	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
+
+	registerDomains(t, z, 1)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	configureAsset(t, z, 1, assetIdFor(types.ZnnTokenStandard))
+	registerExecutorFully(t, z, g.Pillar1Name, g.User1.Address)
+
+	target := types.Hash{0x07}
+	deposit := func(amount int64) {
+		settlementCall(t, z, depositStep(g.User1.Address, types.ZnnTokenStandard, amount, 1, target, 5000), nil)
+	}
+	root := func(b byte) types.Hash { return hashFromByteForTest(b) }
+	pre1 := root(0x51)
+
+	deposit(100)
+	deposit(5)
+	settlementCall(t, z, submitBatchStep(g.User1.Address, batchCommitment(1, 0, 0, 1, types.ZeroHash, pre1, g.User1.Address, znnDepositSummary(105))), nil)
+
+	entry, err := definition.GetBatchEntry(settlementStorage(t, z), 1, 0)
+	common.FailIfErr(t, err)
+	if entry.ExecutorPillar != g.Pillar1Name || entry.State != definition.BatchStateSubmitted || entry.PostStateRoot != pre1 || entry.SubmittedAtHeight == 0 {
+		t.Fatalf("unexpected entry %+v", entry)
+	}
+	if entry.FinalizeAtHeight-entry.SubmittedAtHeight != 10 {
+		t.Fatalf("expected a delay of 10, got %d", entry.FinalizeAtHeight-entry.SubmittedAtHeight)
+	}
+	cursor, err := definition.GetInputSequenceCursor(settlementStorage(t, z), 1)
+	common.FailIfErr(t, err)
+	if cursor.ConsumedInputCount != 2 || cursor.NextBatchId != 1 {
+		t.Fatalf("unexpected cursor %+v", cursor)
+	}
+
+	deposit(1)
+	pre2 := root(0x52)
+	settlementCall(t, z, submitBatchStep(g.User1.Address, batchCommitment(1, 1, 2, 2, pre1, pre2, g.User1.Address, znnDepositSummary(1))), nil)
+
+	registerExecutorFully(t, z, g.Pillar2Name, g.User2.Address)
+	deposit(2)
+	settlementCall(t, z, submitBatchStep(g.User2.Address, batchCommitment(1, 2, 3, 3, root(0x99), root(0x53), g.User2.Address, znnDepositSummary(2))), constants.ErrForbiddenParam)
+	settlementCall(t, z, submitBatchStep(g.User1.Address, batchCommitment(1, 2, 3, 3, pre2, root(0x53), g.User1.Address, znnDepositSummary(2))), constants.ErrPermissionDenied)
+	settlementCall(t, z, submitBatchStep(g.User2.Address, batchCommitment(1, 2, 3, 3, pre2, root(0x53), g.User2.Address, znnDepositSummary(2))), nil)
+	entry, err = definition.GetBatchEntry(settlementStorage(t, z), 1, 2)
+	common.FailIfErr(t, err)
+	if entry.ExecutorPillar != g.Pillar2Name {
+		t.Fatalf("expected pillar 2, got %q", entry.ExecutorPillar)
+	}
+
+	deposit(3)
+	settlementCall(t, z, pauseStep(g.User5.Address, 1, false, definition.PauseScopeSubmit, true), nil)
+	settlementCall(t, z, submitBatchStep(g.User2.Address, batchCommitment(1, 3, 4, 4, root(0x53), root(0x54), g.User2.Address, znnDepositSummary(3))), constants.ErrSettlementSubmitPaused)
 }

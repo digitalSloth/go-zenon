@@ -2,6 +2,7 @@ package implementation
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"math"
 	"math/big"
@@ -1084,4 +1085,641 @@ func TestChargeBytecodeFee_ExactFeeIsCollected(t *testing.T) {
 	common.FailIfErr(t, err)
 	expectBig(t, "second fee", fee, 3)
 	expectBig(t, "second collected", collectedOf(t, storage), 353)
+}
+
+// ============================================================================
+// SubmitBatch
+// ============================================================================
+
+const (
+	conformanceCommitmentHex         = "00010001000100010001000100020001000100000001000000000000006400000000000000000000000000000005010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303040404040404040404040404040404040404040404040404040404040404040405050505050505050505050505050505050505050505050505050505050505050606060606060606060606060606060606060606060606060606060606060606070707070707070707070707070707070707070707070707070707070707070700eeee0000000000000000000000000000000000000000000000003039000000020000000000000000000000000000000000000000000004066318c6318c6318c6000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000014e66318c6318c6318c60000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000"
+	conformanceCommitmentTrailingHex = conformanceCommitmentHex + "00"
+	conformanceCommitmentProofHex    = "00010001000100010001000100020001000100000001000000000000006400000000000000000000000000000005010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303040404040404040404040404040404040404040404040404040404040404040405050505050505050505050505050505050505050505050505050505050505050606060606060606060606060606060606060606060606060606060606060606070707070707070707070707070707070707070707070707070707070707070700eeee0000000000000000000000000000000000000000000000003039000000020000000000000000000000000000000000000000000004066318c6318c6318c6000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000014e66318c6318c6318c6000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020000000001ab"
+)
+
+func mustHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	common.FailIfErr(t, err)
+	return b
+}
+
+// pinnedVersions returns the commitment bytes with the version block set
+// to the pinned values.
+func pinnedVersions(t *testing.T, s string) []byte {
+	b := mustHex(t, s)
+	b[12], b[13] = 0, 1
+	return b
+}
+
+func TestDecodeBatchCommitment_RejectsUnpinnedReceiptVersion(t *testing.T) {
+	_, _, _, err := decodeBatchCommitment(mustHex(t, conformanceCommitmentHex))
+	expectErr(t, "receipt version 2", err, constants.ErrForbiddenParam)
+}
+
+func TestDecodeBatchCommitment_DecodesFields(t *testing.T) {
+	entry, executor, height, err := decodeBatchCommitment(pinnedVersions(t, conformanceCommitmentHex))
+	common.FailIfErr(t, err)
+
+	if entry.DomainId != 1 || entry.BatchId != 100 || entry.FirstInputSeq != 0 || entry.LastInputSeq != 5 {
+		t.Fatalf("unexpected key or bounds %+v", entry)
+	}
+	if entry.ProtocolVersion != 1 || entry.DaMode != 0 {
+		t.Fatalf("unexpected version %d or mode %d", entry.ProtocolVersion, entry.DaMode)
+	}
+	for i, h := range []types.Hash{entry.PreStateRoot, entry.PostStateRoot, entry.InputRoot, entry.ReceiptRoot, entry.EventRoot, entry.OutboxRoot, entry.DaHash} {
+		if h != deployTestHash(byte(i+1)) {
+			t.Fatalf("hash %d: got %v", i, h)
+		}
+	}
+	var wantExecutor types.Address
+	wantExecutor[0], wantExecutor[1] = 0xee, 0xee
+	if executor != wantExecutor || height != 12345 {
+		t.Fatalf("unexpected executor %v or height %d", executor, height)
+	}
+	if len(entry.AssetFlowSummary) != 4+2*assetFlowEntrySize || len(entry.ProofData) != 0 || entry.ProofData == nil {
+		t.Fatalf("unexpected summary length %d or proofData %v", len(entry.AssetFlowSummary), entry.ProofData)
+	}
+}
+
+func TestDecodeBatchCommitment_RejectsEachUnpinnedVersion(t *testing.T) {
+	for i := 0; i < 9; i++ {
+		b := pinnedVersions(t, conformanceCommitmentHex)
+		b[2*i], b[2*i+1] = 0, 2
+		_, _, _, err := decodeBatchCommitment(b)
+		expectErr(t, "version field "+string(rune('0'+i)), err, constants.ErrForbiddenParam)
+	}
+}
+
+func TestDecodeBatchCommitment_RejectsMalformed(t *testing.T) {
+	valid := pinnedVersions(t, conformanceCommitmentHex)
+	tooManyAssets := append([]byte{}, valid...)
+	tooManyAssets[299], tooManyAssets[300], tooManyAssets[301], tooManyAssets[302] = 0, 0, 0, 17
+
+	for _, c := range []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"non-empty proofData", pinnedVersions(t, conformanceCommitmentProofHex), constants.ErrForbiddenParam},
+		{"trailing byte", pinnedVersions(t, conformanceCommitmentTrailingHex), constants.ErrForbiddenParam},
+		{"17 bytes", valid[:17], constants.ErrForbiddenParam},
+		{"18 bytes", valid[:18], constants.ErrForbiddenParam},
+		{"298 bytes", valid[:298], constants.ErrForbiddenParam},
+		{"302 bytes", valid[:302], constants.ErrForbiddenParam},
+		{"missing last byte", valid[:len(valid)-1], constants.ErrForbiddenParam},
+		{"17 assets", tooManyAssets, constants.ErrSettlementInvalidAssetFlow},
+	} {
+		_, _, _, err := decodeBatchCommitment(c.data)
+		expectErr(t, c.name, err, c.want)
+	}
+}
+
+// batchSpec describes a commitment for encodeCommitment; the versions are
+// pinned and the wire height is 0.
+type batchSpec struct {
+	domain        uint32
+	batchId       uint64
+	first, last   uint64
+	pre, post     types.Hash
+	daMode        uint8
+	executor      types.Address
+	summary       []byte
+	wireHeight    uint64
+	proofDataSize uint32
+}
+
+func encodeCommitment(s batchSpec) []byte {
+	var out []byte
+	for i := 0; i < 9; i++ {
+		out = binary.BigEndian.AppendUint16(out, 1)
+	}
+	out = binary.BigEndian.AppendUint32(out, s.domain)
+	out = binary.BigEndian.AppendUint64(out, s.batchId)
+	out = binary.BigEndian.AppendUint64(out, s.first)
+	out = binary.BigEndian.AppendUint64(out, s.last)
+	out = append(out, s.pre[:]...)
+	out = append(out, s.post[:]...)
+	for i := 0; i < 5; i++ {
+		out = append(out, deployTestHash(byte(0x30+i)).Bytes()...)
+	}
+	out = append(out, s.daMode)
+	out = append(out, s.executor[:]...)
+	out = binary.BigEndian.AppendUint64(out, s.wireHeight)
+	summary := s.summary
+	if summary == nil {
+		summary = flowSummary()
+	}
+	out = append(out, summary...)
+	return binary.BigEndian.AppendUint32(out, s.proofDataSize)
+}
+
+func submitBlock(t *testing.T, method *SettlementSubmitBatchMethod, sender types.Address, commitment []byte) *nom.AccountBlock {
+	t.Helper()
+	data, err := definition.ABISettlement.PackMethod(method.MethodName, commitment)
+	common.FailIfErr(t, err)
+	return &nom.AccountBlock{Address: sender, Amount: big.NewInt(0), Data: data}
+}
+
+func TestSubmitBatchValidateSendBlock(t *testing.T) {
+	method := &SettlementSubmitBatchMethod{MethodName: definition.SettlementSubmitBatchMethodName}
+	executor := feeTestAddress(0xE1)
+	good := batchSpec{domain: 1, executor: executor}
+
+	common.FailIfErr(t, method.ValidateSendBlock(submitBlock(t, method, executor, encodeCommitment(good))))
+
+	oversize := make([]byte, constants.MaxOnChainCommitmentSize+1)
+	expectErr(t, "oversize commitment", method.ValidateSendBlock(submitBlock(t, method, executor, oversize)), constants.ErrForbiddenParam)
+
+	expectErr(t, "other sender", method.ValidateSendBlock(submitBlock(t, method, feeTestAddress(0xE2), encodeCommitment(good))), constants.ErrPermissionDenied)
+
+	withHeight := good
+	withHeight.wireHeight = 7
+	expectErr(t, "wire height", method.ValidateSendBlock(submitBlock(t, method, executor, encodeCommitment(withHeight))), constants.ErrForbiddenParam)
+
+	paid := submitBlock(t, method, executor, encodeCommitment(good))
+	paid.Amount = big.NewInt(1)
+	expectErr(t, "attached amount", method.ValidateSendBlock(paid), constants.ErrInvalidTokenOrAmount)
+
+	expectErr(t, "bad data", method.ValidateSendBlock(&nom.AccountBlock{Address: executor, Amount: big.NewInt(0), Data: []byte{1, 2}}), constants.ErrUnpackError)
+}
+
+func TestAdmitInput_AssignsDomainOrdinals(t *testing.T) {
+	storage := feeTestStorage()
+	for _, domain := range []uint32{1, 2, 1, 2, 1} {
+		common.FailIfErr(t, admitInput(storage, domain, types.ZeroHash, nil, nil))
+	}
+
+	for _, w := range []struct {
+		domain  uint32
+		ordinal uint64
+		global  uint64
+	}{{1, 0, 0}, {1, 1, 2}, {1, 2, 4}, {2, 0, 1}, {2, 1, 3}} {
+		o, err := definition.GetDomainInputOrdinal(storage, w.domain, w.ordinal)
+		common.FailIfErr(t, err)
+		if o.GlobalInputIndex != w.global {
+			t.Fatalf("domain %d ordinal %d: got global %d want %d", w.domain, w.ordinal, o.GlobalInputIndex, w.global)
+		}
+	}
+	for domain, want := range map[uint32]uint64{1: 3, 2: 2} {
+		counter, err := definition.GetDomainInputCounter(storage, domain)
+		common.FailIfErr(t, err)
+		if counter.Count != want {
+			t.Fatalf("domain %d: counter %d want %d", domain, counter.Count, want)
+		}
+	}
+}
+
+const (
+	batchDelay    = uint64(10)
+	batchDomain   = uint32(1)
+	otherDomain   = uint32(2)
+	submitHeight0 = uint64(100)
+)
+
+var batchExecutor = feeTestAddress(0xE1)
+
+// batchStorage returns a storage with registered domains 1 and 2, an
+// approved DA mode 0, and an active executor for pillar-a.
+func batchStorage(t *testing.T) db.DB {
+	storage := feeTestStorage()
+	for _, id := range []uint32{batchDomain, otherDomain} {
+		common.FailIfErr(t, (&definition.DomainRecord{DomainRecordKey: definition.DomainRecordKey{DomainId: id}, DomainClass: 1}).Save(storage))
+		common.FailIfErr(t, (&definition.DomainConfig{DomainId: id, WithdrawalDelay: batchDelay}).Save(storage))
+		common.FailIfErr(t, (&definition.ApprovedDAModeSet{DomainId: id, Modes: []byte{0}}).Save(storage))
+	}
+	common.FailIfErr(t, (&definition.ExecutorSetMember{
+		PillarName: "pillar-a", ExecutorAddress: batchExecutor, Status: definition.ExecutorStatusActive,
+	}).Save(storage))
+	return storage
+}
+
+func admitN(t *testing.T, storage db.DB, domain uint32, n int, fee int64) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		common.FailIfErr(t, admitInput(storage, domain, types.ZeroHash, nil, big.NewInt(fee)))
+	}
+}
+
+func rootOf(b byte) types.Hash { return deployTestHash(b) }
+
+// submitBatch decodes spec through the wire format and accepts it at height.
+func submitBatch(t *testing.T, storage db.DB, height uint64, spec batchSpec) error {
+	t.Helper()
+	spec.executor = batchExecutor
+	entry, _, _, err := decodeBatchCommitment(encodeCommitment(spec))
+	common.FailIfErr(t, err)
+	return acceptBatch(storage, height, feeTestPillars(), batchExecutor, entry)
+}
+
+func cursorOf(t *testing.T, storage db.DB, domain uint32) definition.InputSequenceCursor {
+	t.Helper()
+	cursor, err := definition.GetInputSequenceCursor(storage, domain)
+	common.FailIfErr(t, err)
+	return *cursor
+}
+
+func hasInput(t *testing.T, storage db.DB, domain uint32, ordinal, global uint64) (record, entry bool) {
+	t.Helper()
+	_, err := definition.GetAssignedIndexRecord(storage, domain, global)
+	if err != nil && err != constants.ErrDataNonExistent {
+		t.Fatal(err)
+	}
+	record = err == nil
+	_, err = definition.GetDomainInputOrdinal(storage, domain, ordinal)
+	if err != nil && err != constants.ErrDataNonExistent {
+		t.Fatal(err)
+	}
+	return record, err == nil
+}
+
+func TestAcceptBatch_AcceptsFirstAndChainedBatches(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 5, 3)
+
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, batchId: 0, first: 0, last: 1, pre: types.ZeroHash, post: rootOf(0x51)}))
+	entry, err := definition.GetBatchEntry(storage, batchDomain, 0)
+	common.FailIfErr(t, err)
+	if entry.ExecutorPillar != "pillar-a" || entry.SubmittedAtHeight != submitHeight0 || entry.FinalizeAtHeight != submitHeight0+batchDelay || entry.State != definition.BatchStateSubmitted {
+		t.Fatalf("unexpected entry %+v", entry)
+	}
+	if got := cursorOf(t, storage, batchDomain); got.ConsumedInputCount != 2 || got.NextBatchId != 1 {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+	pending, err := definition.GetPendingFee(storage, feeEpochOf(submitHeight0), "pillar-a")
+	common.FailIfErr(t, err)
+	expectBig(t, "pending fee", pending.Amount, 6)
+
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0+1, batchSpec{domain: batchDomain, batchId: 1, first: 2, last: 4, pre: rootOf(0x51), post: rootOf(0x52)}))
+	if got := cursorOf(t, storage, batchDomain); got.ConsumedInputCount != 5 || got.NextBatchId != 2 {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+}
+
+func TestAcceptBatch_AcceptsDepositSummary(t *testing.T) {
+	storage := batchStorage(t)
+	common.FailIfErr(t, admitInput(storage, batchDomain, znnAssetId(), big.NewInt(5), nil))
+	summary := flowSummary(flowEntry(znnAssetId(), 5, 0))
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, summary: summary}))
+
+	bad := batchStorage(t)
+	common.FailIfErr(t, admitInput(bad, batchDomain, znnAssetId(), big.NewInt(5), nil))
+	err := submitBatch(t, bad, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, summary: flowSummary(flowEntry(znnAssetId(), 4, 0))})
+	expectErr(t, "wrong credit", err, constants.ErrSettlementInvalidAssetFlow)
+}
+
+func TestAcceptBatch_InterleavedDomains(t *testing.T) {
+	storage := batchStorage(t)
+	for _, domain := range []uint32{batchDomain, otherDomain, batchDomain, otherDomain, batchDomain} {
+		admitN(t, storage, domain, 1, 0)
+	}
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 2}))
+
+	err := submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, batchId: 1, first: 2, last: 4, pre: types.ZeroHash})
+	expectErr(t, "overlap", err, constants.ErrForbiddenParam)
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, batchId: 1, first: 4, last: 4}))
+}
+
+// rejection pairs a submission with the error it must return.
+func TestAcceptBatch_RejectsAndWritesNothing(t *testing.T) {
+	setup := func() db.DB {
+		storage := batchStorage(t)
+		admitN(t, storage, batchDomain, 2, 3)
+		admitN(t, storage, otherDomain, 1, 0)
+		common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, post: rootOf(0x51)}))
+		return storage
+	}
+	// the domain-1 batch starts at global index 1, since index 0 is consumed.
+	valid := batchSpec{domain: batchDomain, batchId: 1, first: 1, last: 1, pre: rootOf(0x51)}
+	with := func(f func(*batchSpec)) batchSpec { s := valid; f(&s); return s }
+
+	for _, c := range []struct {
+		name string
+		spec batchSpec
+		want error
+	}{
+		{"replayed batchId", with(func(s *batchSpec) { s.batchId = 0 }), constants.ErrForbiddenParam},
+		{"skipped batchId", with(func(s *batchSpec) { s.batchId = 2 }), constants.ErrForbiddenParam},
+		{"wrong preStateRoot", with(func(s *batchSpec) { s.pre = rootOf(0x99) }), constants.ErrForbiddenParam},
+		{"unregistered domain", with(func(s *batchSpec) { s.domain = 9 }), constants.ErrForbiddenParam},
+		{"unregistered domain 0", with(func(s *batchSpec) { s.domain = 0 }), constants.ErrForbiddenParam},
+		{"unapproved DA mode", with(func(s *batchSpec) { s.daMode = 1 }), constants.ErrForbiddenParam},
+		{"gap", with(func(s *batchSpec) { s.first = 2 }), constants.ErrForbiddenParam},
+		{"last not yet assigned", with(func(s *batchSpec) { s.last = 5 }), constants.ErrForbiddenParam},
+		{"last below first", with(func(s *batchSpec) { s.last = 0 }), constants.ErrForbiddenParam},
+		{"last in another domain", with(func(s *batchSpec) { s.last = 2 }), constants.ErrForbiddenParam},
+		{"non-canonical asset", with(func(s *batchSpec) {
+			s.summary = flowSummary(flowEntry(types.HexToHashPanic("0000000000000000000000000000000000000000000000000000000000000001"), 1, 0))
+		}), constants.ErrSettlementInvalidAssetFlow},
+	} {
+		storage := setup()
+		beforeCursor := cursorOf(t, storage, batchDomain)
+		err := submitBatch(t, storage, submitHeight0+1, c.spec)
+		expectErr(t, c.name, err, c.want)
+
+		if got := cursorOf(t, storage, batchDomain); got != beforeCursor {
+			t.Fatalf("%s: cursor changed to %+v", c.name, got)
+		}
+		if _, err := definition.GetBatchEntry(storage, batchDomain, 1); err != constants.ErrDataNonExistent {
+			t.Fatalf("%s: expected no batch 1, got %v", c.name, err)
+		}
+		pending, err := definition.GetPendingFee(storage, feeEpochOf(submitHeight0), "pillar-a")
+		common.FailIfErr(t, err)
+		expectBig(t, c.name+" pending fee", pending.Amount, 3)
+		for _, in := range []struct {
+			domain  uint32
+			ordinal uint64
+			global  uint64
+		}{{batchDomain, 0, 0}, {batchDomain, 1, 1}, {otherDomain, 0, 2}} {
+			if record, entry := hasInput(t, storage, in.domain, in.ordinal, in.global); !record || !entry {
+				t.Fatalf("%s: input %d missing", c.name, in.global)
+			}
+		}
+	}
+}
+
+func TestAcceptBatch_InputCountBound(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, constants.MaxBatchInputs+1, 0)
+
+	err := submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: constants.MaxBatchInputs})
+	expectErr(t, "65 inputs", err, constants.ErrForbiddenParam)
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: constants.MaxBatchInputs - 1}))
+	if got := cursorOf(t, storage, batchDomain); got.ConsumedInputCount != constants.MaxBatchInputs {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+}
+
+func TestAcceptBatch_FirstBatchNeedsZeroPreStateRoot(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 1, 0)
+	err := submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, pre: rootOf(0x01)})
+	expectErr(t, "non-zero first preStateRoot", err, constants.ErrForbiddenParam)
+}
+
+func TestAcceptBatch_NoApprovedDAModes(t *testing.T) {
+	storage := batchStorage(t)
+	common.FailIfErr(t, (&definition.ApprovedDAModeSet{DomainId: batchDomain}).Save(storage))
+	admitN(t, storage, batchDomain, 1, 0)
+	err := submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0})
+	expectErr(t, "no approved modes", err, constants.ErrForbiddenParam)
+}
+
+func TestAcceptBatch_PauseScopes(t *testing.T) {
+	spec := batchSpec{domain: batchDomain, first: 0, last: 0}
+	for _, c := range []struct {
+		name  string
+		pause func(storage db.DB)
+		want  error
+	}{
+		{"global submit", func(s db.DB) { common.FailIfErr(t, (&definition.PauseState{SubmitPaused: true}).SaveGlobal(s)) }, constants.ErrSettlementSubmitPaused},
+		{"domain submit", func(s db.DB) {
+			common.FailIfErr(t, (&definition.PauseState{SubmitPaused: true}).SaveDomain(s, batchDomain))
+		}, constants.ErrSettlementSubmitPaused},
+		{"global relay", func(s db.DB) { common.FailIfErr(t, (&definition.PauseState{RelayPaused: true}).SaveGlobal(s)) }, nil},
+	} {
+		storage := batchStorage(t)
+		admitN(t, storage, batchDomain, 1, 0)
+		c.pause(storage)
+		err := submitBatch(t, storage, submitHeight0, spec)
+		if c.want == nil {
+			common.FailIfErr(t, err)
+		} else {
+			expectErr(t, c.name, err, c.want)
+		}
+	}
+}
+
+func TestAcceptBatch_PausedDomainStillBatches(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 1, 0)
+	common.FailIfErr(t, (&definition.DomainRecord{DomainRecordKey: definition.DomainRecordKey{DomainId: batchDomain}, DomainClass: 1, Status: definition.DomainStatusPaused}).Save(storage))
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0}))
+}
+
+func TestAcceptBatch_RejectsUnentitledCaller(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 1, 0)
+	entry, _, _, err := decodeBatchCommitment(encodeCommitment(batchSpec{domain: batchDomain, first: 0, last: 0}))
+	common.FailIfErr(t, err)
+
+	expectErr(t, "other caller", acceptBatch(storage, submitHeight0, feeTestPillars(), feeTestAddress(0xE2), entry), constants.ErrPermissionDenied)
+	expectErr(t, "pillar not active", acceptBatch(storage, submitHeight0, []*definition.PillarInfo{{Name: "pillar-b"}}, batchExecutor, entry), constants.ErrPermissionDenied)
+}
+
+func TestAcceptBatch_ReplacedExecutorChainsFromLastRoot(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 3, 0)
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, post: rootOf(0x51)}))
+
+	newExecutor := feeTestAddress(0xE3)
+	common.FailIfErr(t, (&definition.ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: batchExecutor, Status: definition.ExecutorStatusLapsed}).Save(storage))
+	common.FailIfErr(t, (&definition.ExecutorSetMember{PillarName: "pillar-b", ExecutorAddress: newExecutor, Status: definition.ExecutorStatusActive}).Save(storage))
+
+	next := batchSpec{domain: batchDomain, batchId: 1, first: 1, last: 1, pre: rootOf(0x51), executor: newExecutor}
+	entry, _, _, err := decodeBatchCommitment(encodeCommitment(next))
+	common.FailIfErr(t, err)
+	expectErr(t, "old executor", acceptBatch(storage, submitHeight0+1, feeTestPillars(), batchExecutor, entry), constants.ErrPermissionDenied)
+
+	next.pre = rootOf(0x99)
+	wrong, _, _, err := decodeBatchCommitment(encodeCommitment(next))
+	common.FailIfErr(t, err)
+	expectErr(t, "wrong pre root", acceptBatch(storage, submitHeight0+1, feeTestPillars(), newExecutor, wrong), constants.ErrForbiddenParam)
+
+	common.FailIfErr(t, acceptBatch(storage, submitHeight0+1, feeTestPillars(), newExecutor, entry))
+	stored, err := definition.GetBatchEntry(storage, batchDomain, 1)
+	common.FailIfErr(t, err)
+	if stored.ExecutorPillar != "pillar-b" {
+		t.Fatalf("got pillar %q want pillar-b", stored.ExecutorPillar)
+	}
+}
+
+func TestAcceptBatch_ConfigChangeKeepsFinalizeAtHeight(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 2, 0)
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0}))
+	common.FailIfErr(t, (&definition.DomainConfig{DomainId: batchDomain, WithdrawalDelay: 500}).Save(storage))
+	entry, err := definition.GetBatchEntry(storage, batchDomain, 0)
+	common.FailIfErr(t, err)
+	if entry.FinalizeAtHeight != submitHeight0+batchDelay {
+		t.Fatalf("got FinalizeAtHeight %d", entry.FinalizeAtHeight)
+	}
+}
+
+// submitSingles accepts n one-input batches for domain, batchId from first.
+func submitSingles(t *testing.T, storage db.DB, domain uint32, n int, height uint64) {
+	t.Helper()
+	cursor := cursorOf(t, storage, domain)
+	for i := 0; i < n; i++ {
+		b := cursor.NextBatchId
+		pre := types.ZeroHash
+		if b > 0 {
+			pre = rootOf(byte(0x50 + b - 1))
+		}
+		first := cursor.ConsumedInputCount
+		o, err := definition.GetDomainInputOrdinal(storage, domain, first)
+		common.FailIfErr(t, err)
+		common.FailIfErr(t, submitBatch(t, storage, height, batchSpec{domain: domain, batchId: b, first: o.GlobalInputIndex, last: o.GlobalInputIndex, pre: pre, post: rootOf(byte(0x50 + b))}))
+		cursor = cursorOf(t, storage, domain)
+	}
+}
+
+func TestSweep_DeletesTwoFinalizedBatchesPerSubmit(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 5, 0)
+	admitN(t, storage, otherDomain, 1, 0)
+	submitSingles(t, storage, batchDomain, 3, submitHeight0)
+
+	submitSingles(t, storage, batchDomain, 1, submitHeight0+batchDelay)
+	got := cursorOf(t, storage, batchDomain)
+	if got.RecordsSweptThrough != 2 || got.SweptInputCount != 2 || got.NextBatchId != 4 {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+	for ordinal := uint64(0); ordinal < 2; ordinal++ {
+		if record, entry := hasInput(t, storage, batchDomain, ordinal, ordinal); record || entry {
+			t.Fatalf("ordinal %d not swept", ordinal)
+		}
+	}
+	for ordinal := uint64(2); ordinal < 4; ordinal++ {
+		if record, entry := hasInput(t, storage, batchDomain, ordinal, ordinal); !record || !entry {
+			t.Fatalf("ordinal %d swept", ordinal)
+		}
+	}
+	if record, entry := hasInput(t, storage, otherDomain, 0, 5); !record || !entry {
+		t.Fatal("other domain's input swept")
+	}
+
+	admitN(t, storage, batchDomain, 1, 0)
+	submitSingles(t, storage, batchDomain, 1, submitHeight0+batchDelay)
+	got = cursorOf(t, storage, batchDomain)
+	if got.RecordsSweptThrough != 3 || got.SweptInputCount != 3 {
+		t.Fatalf("expected batch 2 swept and batch 3 kept, got %+v", got)
+	}
+}
+
+func TestSweep_WaitsForFinality(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 3, 0)
+	submitSingles(t, storage, batchDomain, 2, submitHeight0)
+
+	submitSingles(t, storage, batchDomain, 1, submitHeight0+batchDelay-1)
+	got := cursorOf(t, storage, batchDomain)
+	if got.RecordsSweptThrough != 0 || got.SweptInputCount != 0 {
+		t.Fatalf("expected nothing swept, got %+v", got)
+	}
+	if record, entry := hasInput(t, storage, batchDomain, 0, 0); !record || !entry {
+		t.Fatal("input 0 deleted before its batch finalized")
+	}
+}
+
+func TestSweep_StopsAtUnfinalizedHead(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 3, 0)
+	submitSingles(t, storage, batchDomain, 1, submitHeight0)
+	common.FailIfErr(t, (&definition.DomainConfig{DomainId: batchDomain, WithdrawalDelay: 1}).Save(storage))
+	submitSingles(t, storage, batchDomain, 1, submitHeight0+2)
+
+	// batch 1 finalizes at submitHeight0+3 while batch 0 finalizes at +10
+	common.FailIfErr(t, (&definition.DomainConfig{DomainId: batchDomain, WithdrawalDelay: batchDelay}).Save(storage))
+	submitSingles(t, storage, batchDomain, 1, submitHeight0+5)
+	got := cursorOf(t, storage, batchDomain)
+	if got.RecordsSweptThrough != 0 || got.SweptInputCount != 0 {
+		t.Fatalf("expected nothing swept, got %+v", got)
+	}
+	if record, entry := hasInput(t, storage, batchDomain, 1, 1); !record || !entry {
+		t.Fatal("input 1 deleted while batch 0 was unfinalized")
+	}
+}
+
+func TestSweep_RejectedSubmitSweepsNothing(t *testing.T) {
+	storage := batchStorage(t)
+	admitN(t, storage, batchDomain, 2, 0)
+	submitSingles(t, storage, batchDomain, 1, submitHeight0)
+
+	err := submitBatch(t, storage, submitHeight0+batchDelay, batchSpec{domain: batchDomain, batchId: 1, first: 1, last: 1, pre: rootOf(0x99)})
+	expectErr(t, "wrong pre root", err, constants.ErrForbiddenParam)
+	if got := cursorOf(t, storage, batchDomain); got.RecordsSweptThrough != 0 {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+	if record, entry := hasInput(t, storage, batchDomain, 0, 0); !record || !entry {
+		t.Fatal("input 0 deleted by a rejected submit")
+	}
+}
+
+func TestSweep_MultiInputBatchesAmongInterleavedDomains(t *testing.T) {
+	storage := batchStorage(t)
+	// globals: A0 B1 A2 A3 B4 A5 A6
+	for _, domain := range []uint32{batchDomain, otherDomain, batchDomain, batchDomain, otherDomain, batchDomain, batchDomain} {
+		admitN(t, storage, domain, 1, 0)
+	}
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 2, post: rootOf(0x50)}))
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, batchId: 1, first: 3, last: 5, pre: rootOf(0x50), post: rootOf(0x51)}))
+
+	// both batches finalize at submitHeight0+batchDelay, so the sweep deletes their four inputs.
+	common.FailIfErr(t, submitBatch(t, storage, submitHeight0+batchDelay, batchSpec{domain: batchDomain, batchId: 2, first: 6, last: 6, pre: rootOf(0x51)}))
+	got := cursorOf(t, storage, batchDomain)
+	if got.RecordsSweptThrough != 2 || got.SweptInputCount != 4 {
+		t.Fatalf("unexpected cursor %+v", got)
+	}
+	for ordinal, global := range []uint64{0, 2, 3, 5, 6} {
+		record, entry := hasInput(t, storage, batchDomain, uint64(ordinal), global)
+		if ordinal < 4 && (record || entry) {
+			t.Fatalf("ordinal %d (global %d) not swept", ordinal, global)
+		}
+		if ordinal == 4 && (!record || !entry) {
+			t.Fatalf("ordinal %d (global %d) swept", ordinal, global)
+		}
+	}
+	for ordinal, global := range []uint64{1, 4} {
+		if record, entry := hasInput(t, storage, otherDomain, uint64(ordinal), global); !record || !entry {
+			t.Fatalf("other domain input %d swept", global)
+		}
+	}
+}
+
+func TestAcceptBatch_RejectionsLeaveSweepableStateUntouched(t *testing.T) {
+	setup := func() db.DB {
+		storage := batchStorage(t)
+		admitN(t, storage, batchDomain, 3, 0)
+		submitSingles(t, storage, batchDomain, 2, submitHeight0)
+		return storage
+	}
+	valid := batchSpec{domain: batchDomain, batchId: 2, first: 2, last: 2, pre: rootOf(0x51)}
+	height := submitHeight0 + batchDelay
+
+	for _, c := range []struct {
+		name string
+		run  func(storage db.DB) error
+		want error
+	}{
+		{"submit paused", func(s db.DB) error {
+			common.FailIfErr(t, (&definition.PauseState{SubmitPaused: true}).SaveDomain(s, batchDomain))
+			return submitBatch(t, s, height, valid)
+		}, constants.ErrSettlementSubmitPaused},
+		{"unentitled caller", func(s db.DB) error {
+			entry, _, _, err := decodeBatchCommitment(encodeCommitment(valid))
+			common.FailIfErr(t, err)
+			return acceptBatch(s, height, feeTestPillars(), feeTestAddress(0xE2), entry)
+		}, constants.ErrPermissionDenied},
+		{"unapproved DA mode", func(s db.DB) error {
+			spec := valid
+			spec.daMode = 1
+			return submitBatch(t, s, height, spec)
+		}, constants.ErrForbiddenParam},
+		{"overlapping inputs", func(s db.DB) error {
+			spec := valid
+			spec.first = 1
+			return submitBatch(t, s, height, spec)
+		}, constants.ErrForbiddenParam},
+	} {
+		storage := setup()
+		before := cursorOf(t, storage, batchDomain)
+		expectErr(t, c.name, c.run(storage), c.want)
+		if got := cursorOf(t, storage, batchDomain); got != before {
+			t.Fatalf("%s: cursor changed to %+v", c.name, got)
+		}
+		if record, entry := hasInput(t, storage, batchDomain, 0, 0); !record || !entry {
+			t.Fatalf("%s: input 0 swept", c.name)
+		}
+	}
 }
