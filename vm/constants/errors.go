@@ -112,9 +112,10 @@ var (
 	ErrInvalidRewards     = errors.New("invalid liquidity stake rewards")
 
 	// Settlement
-	ErrNotImplemented        = errors.New("not implemented")
-	ErrSettlementRelayPaused = errors.New("settlement relay paused")
-	ErrSettlementFeeGuard    = errors.New("settlement fee guard violated")
+	ErrNotImplemented         = errors.New("not implemented")
+	ErrSettlementRelayPaused  = errors.New("settlement relay paused")
+	ErrSettlementSubmitPaused = errors.New("settlement submit paused")
+	ErrSettlementFeeGuard     = errors.New("settlement fee guard violated")
 
 	ErrSettlementConservationViolated = errors.New("settlement conservation invariant violated")
 	ErrSettlementInvalidAssetFlow     = errors.New("settlement asset flow summary invalid")

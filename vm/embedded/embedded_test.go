@@ -129,6 +129,7 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetAssetConfig", "id":"d0a6b72a", "signature":"SetAssetConfig(uint32,hash,uint256)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetDomainConfig", "id":"17cb5597", "signature":"SetDomainConfig(uint32,uint64,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetPeripheryConfig", "id":"13bfb01d", "signature":"SetPeripheryConfig(uint256,uint256)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SubmitBatch", "id":"5ffd5f01", "signature":"SubmitBatch(bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"ActivateSpork", "id":"25c54e96", "signature":"ActivateSpork(hash)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"CreateSpork", "id":"b602e311", "signature":"CreateSpork(string,string)"}
