@@ -115,6 +115,8 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Revoke", "id":"58363e24", "signature":"Revoke()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"Update", "id":"20093ea6", "signature":"Update()"}
 {"address":"z1qxemdeddedxsentynelxxxxxxxxxxxxxwy0r2r", "name":"WithdrawQsr", "id":"b3d658fd", "signature":"WithdrawQsr()"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"BuyStorage", "id":"421773e6", "signature":"BuyStorage(uint32,hash,uint64)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"CallL2", "id":"809c46e0", "signature":"CallL2(uint32,hash,uint64,bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"CollectReward", "id":"af43d3f0", "signature":"CollectReward()"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"DeployContractChunk", "id":"8c11554b", "signature":"DeployContractChunk(uint32,hash,uint32,hash,bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"DeployContractFinalize", "id":"7ff95ed3", "signature":"DeployContractFinalize(uint32,hash)"}
@@ -131,7 +133,9 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetDomainConfig", "id":"17cb5597", "signature":"SetDomainConfig(uint32,uint64,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetPeripheryConfig", "id":"13bfb01d", "signature":"SetPeripheryConfig(uint256,uint256)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SubmitBatch", "id":"5ffd5f01", "signature":"SubmitBatch(bytes)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"TransferContractOwnership", "id":"aef32847", "signature":"TransferContractOwnership(uint32,hash,address)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Update", "id":"20093ea6", "signature":"Update()"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"UpgradeContract", "id":"5fa17d69", "signature":"UpgradeContract(uint32,hash,hash)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"ActivateSpork", "id":"25c54e96", "signature":"ActivateSpork(hash)"}
 {"address":"z1qxemdeddedxsp0rkxxxxxxxxxxxxxxxx956u48", "name":"CreateSpork", "id":"b602e311", "signature":"CreateSpork(string,string)"}
 {"address":"z1qxemdeddedxstakexxxxxxxxxxxxxxxxjv8v62", "name":"Cancel", "id":"5a92fe32", "signature":"Cancel(hash)"}
