@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zenon-network/go-zenon/common/crypto"
 	"github.com/zenon-network/go-zenon/common/db"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm"
@@ -800,7 +801,6 @@ func TestSettlement_DispatchAfterSpork(t *testing.T) {
 	defer z.SaveLogs(common.EmbeddedLogger).Equals(t, `
 t=2001-09-09T01:46:50+0000 lvl=dbug msg=created module=embedded contract=spork spork="&{Id:bed2a35fd610e53f6a6c0ffaacc6638fef0588003588cff784b226d12aad4027 Name:spork-offchain-execution Description:activate spork for offchain execution Activated:false EnforcementHeight:0}"
 t=2001-09-09T01:47:00+0000 lvl=dbug msg=activated module=embedded contract=spork spork="&{Id:bed2a35fd610e53f6a6c0ffaacc6638fef0588003588cff784b226d12aad4027 Name:spork-offchain-execution Description:activate spork for offchain execution Activated:true EnforcementHeight:9}"
-t=2001-09-09T01:50:00+0000 lvl=dbug msg="settlement method dispatched (not implemented)" module=embedded contract=settlement method=ReleaseWithdrawals address=z1qzal6c5s9rjnnxd2z7dvdhjxpmmj4fmw56a0mz
 `)
 	activateOffchainExecution(t, z)
 
@@ -810,7 +810,7 @@ t=2001-09-09T01:50:00+0000 lvl=dbug msg="settlement method dispatched (not imple
 		Data:          definition.ABISettlement.PackMethodPanic(definition.SettlementReleaseWithdrawalsMethodName, uint32(0)),
 		TokenStandard: types.ZnnTokenStandard,
 		Amount:        big.NewInt(0),
-	}).Error(t, constants.ErrNotImplemented)
+	}).Error(t, constants.ErrNothingToWithdraw)
 	z.InsertNewMomentum()
 	z.InsertNewMomentum()
 }
@@ -2064,4 +2064,286 @@ func TestSettlement_SubmitBatch_AcceptanceAndChaining(t *testing.T) {
 	deposit(3)
 	settlementCall(t, z, pauseStep(g.User5.Address, 1, false, definition.PauseScopeSubmit, true), nil)
 	settlementCall(t, z, submitBatchStep(g.User2.Address, batchCommitment(1, 3, 4, 4, root(0x53), root(0x54), g.User2.Address, znnDepositSummary(3))), constants.ErrSettlementSubmitPaused)
+}
+
+// ============================================================================
+// RelayMessage and ReleaseWithdrawals
+// ============================================================================
+
+// outboxMessage encodes a 133-byte kind 1 outbox message of ZNN with an
+// empty payload. A zero source marks a runtime-emitted refund.
+func outboxMessage(source types.Hash, input uint64, outbox uint32, to types.Address, amount int64) []byte {
+	out := append([]byte{}, source.Bytes()...)
+	out = binary.BigEndian.AppendUint64(out, input)
+	out = binary.BigEndian.AppendUint32(out, outbox)
+	out = append(out, 1)
+	out = append(out, to.Bytes()...)
+	out = append(out, assetIdFor(types.ZnnTokenStandard).Bytes()...)
+	var word [32]byte
+	big.NewInt(amount).FillBytes(word[:])
+	out = append(out, word[:]...)
+	return binary.BigEndian.AppendUint32(out, 0)
+}
+
+// outboxTree builds the three-leaf SPEC 27.3 tree: the third leaf is
+// promoted past the first level and carries a one-step proof.
+func outboxTree(leaves [][]byte) (root types.Hash, proofs [][]byte) {
+	h := func(prefix byte, parts ...[]byte) []byte {
+		return crypto.Hash(append([][]byte{{prefix}}, parts...)...)
+	}
+	l0, l1, l2 := h(0, leaves[0]), h(0, leaves[1]), h(0, leaves[2])
+	n01 := h(1, l0, l1)
+	rootBytes := h(1, n01, l2)
+	step := func(side byte, sibling []byte) []byte { return append([]byte{side}, sibling...) }
+	proof := func(steps ...[]byte) []byte {
+		out := binary.BigEndian.AppendUint32(nil, uint32(len(steps)))
+		for _, s := range steps {
+			out = append(out, s...)
+		}
+		return out
+	}
+	return types.BytesToHashPanic(rootBytes), [][]byte{
+		proof(step(1, l1), step(1, l2)),
+		proof(step(0, l0), step(1, l2)),
+		proof(step(0, n01)),
+	}
+}
+
+func relayMessageStep(from types.Address, domainId uint32, batchId uint64, message, proof []byte) *nom.AccountBlock {
+	return settlementStep(from, definition.SettlementRelayMessageMethodName, domainId, batchId, message, proof)
+}
+
+func releaseWithdrawalsStep(from types.Address, domainId uint32) *nom.AccountBlock {
+	return settlementStep(from, definition.SettlementReleaseWithdrawalsMethodName, domainId)
+}
+
+// withdrawalFlowSummary is the ZNN summary of a batch that credits
+// deposits and debits the withdrawals its outbox carries.
+func withdrawalFlowSummary(credit, debit int64) []byte {
+	out := binary.BigEndian.AppendUint32(nil, 1)
+	out = append(out, assetIdFor(types.ZnnTokenStandard).Bytes()...)
+	for _, v := range []int64{credit, debit} {
+		var word [32]byte
+		big.NewInt(v).FillBytes(word[:])
+		out = append(out, word[:]...)
+	}
+	return out
+}
+
+type withdrawalSetup struct {
+	z      mock.MockZenon
+	leaves [][]byte
+	proofs [][]byte
+}
+
+// newWithdrawalZenon registers domain 1 with ZNN (cap 1000) and an
+// executor, takes deposits of 100 ZNN from User2 (input 0) and 50 ZNN
+// from User3 (input 1), and submits batch 0 over both with an outbox of
+// three messages: a full refund of 100 to User2, a contract withdrawal
+// of 10 to User4 and a partial refund of 30 to User3.
+func newWithdrawalZenon(t *testing.T) *withdrawalSetup {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	constants.MinAdministratorDelay = 10
+	savedMin := constants.WithdrawalDelayMin
+	constants.WithdrawalDelayMin = 10
+	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
+
+	registerDomains(t, z, 1)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	advanceMomentums(t, z, constants.MinSoftDelay)
+	settlementCall(t, z, setApprovedDAModesStep(g.User5.Address, 1, []byte{0}), nil)
+	configureAsset(t, z, 1, assetIdFor(types.ZnnTokenStandard))
+	registerExecutorFully(t, z, g.Pillar1Name, g.User1.Address)
+
+	target := types.Hash{0x07}
+	settlementCall(t, z, depositStep(g.User2.Address, types.ZnnTokenStandard, 100, 1, target, 5000), nil)
+	settlementCall(t, z, depositStep(g.User3.Address, types.ZnnTokenStandard, 50, 1, target, 5000), nil)
+
+	leaves := [][]byte{
+		outboxMessage(types.ZeroHash, 0, 0, g.User2.Address, 100),
+		outboxMessage(hashFromByteForTest(0x77), 1, 0, g.User4.Address, 10),
+		outboxMessage(types.ZeroHash, 1, 1, g.User3.Address, 30),
+	}
+	root, proofs := outboxTree(leaves)
+	commitment := batchCommitment(1, 0, 0, 1, types.ZeroHash, hashFromByteForTest(0x51), g.User1.Address, withdrawalFlowSummary(150, 140))
+	copy(commitment[206:238], root.Bytes())
+	settlementCall(t, z, submitBatchStep(g.User1.Address, commitment), nil)
+	return &withdrawalSetup{z: z, leaves: leaves, proofs: proofs}
+}
+
+func (w *withdrawalSetup) relay(t *testing.T, i int, want error) {
+	t.Helper()
+	settlementCall(t, w.z, relayMessageStep(g.User1.Address, 1, 0, w.leaves[i], w.proofs[i]), want)
+}
+
+func (w *withdrawalSetup) finalize(t *testing.T) {
+	t.Helper()
+	entry, err := definition.GetBatchEntry(settlementStorage(t, w.z), 1, 0)
+	common.FailIfErr(t, err)
+	frMom, err := w.z.Chain().GetFrontierMomentumStore().GetFrontierMomentum()
+	common.FailIfErr(t, err)
+	if frMom.Height < entry.FinalizeAtHeight {
+		advanceMomentums(t, w.z, entry.FinalizeAtHeight-frMom.Height)
+	}
+}
+
+func (w *withdrawalSetup) counters(t *testing.T) *definition.ConservationCounters {
+	t.Helper()
+	c, err := definition.GetConservationCounters(settlementStorage(t, w.z), 1, assetIdFor(types.ZnnTokenStandard))
+	common.FailIfErr(t, err)
+	return c
+}
+
+func (w *withdrawalSetup) queued(t *testing.T) uint64 {
+	t.Helper()
+	meta, err := definition.GetReleaseQueueMeta(settlementStorage(t, w.z), 1)
+	common.FailIfErr(t, err)
+	return meta.Tail - meta.Head
+}
+
+func TestSettlement_RelayMessage_RegistersAndReleasesRefundsAndWithdrawals(t *testing.T) {
+	w := newWithdrawalZenon(t)
+	z := w.z
+
+	// A batch that is still SUBMITTED cannot be relayed.
+	w.relay(t, 0, constants.ErrForbiddenParam)
+	if w.queued(t) != 0 {
+		t.Fatal("a relay against a SUBMITTED batch queued a withdrawal")
+	}
+
+	w.finalize(t)
+	for i := range w.leaves {
+		w.relay(t, i, nil)
+	}
+	if w.queued(t) != 3 {
+		t.Fatalf("expected 3 queued withdrawals, got %d", w.queued(t))
+	}
+	if c := w.counters(t); c.PendingWithdrawalReserve.Int64() != 140 || c.TotalReleased.Int64() != 0 || c.TotalDeposited.Int64() != 150 {
+		t.Fatalf("counters after registration: %+v", c)
+	}
+	for i := range w.leaves {
+		w.relay(t, i, constants.ErrSettlementOutboxProcessed)
+	}
+	if w.queued(t) != 3 {
+		t.Fatal("a replay changed the queue")
+	}
+
+	// PAUSE_SUBMIT does not stop the release of a finalized batch.
+	settlementCall(t, z, pauseStep(g.User5.Address, 1, false, definition.PauseScopeSubmit, true), nil)
+	before := map[types.Address]int64{
+		g.User2.Address: balanceOf(t, z, g.User2.Address, types.ZnnTokenStandard),
+		g.User3.Address: balanceOf(t, z, g.User3.Address, types.ZnnTokenStandard),
+		g.User4.Address: balanceOf(t, z, g.User4.Address, types.ZnnTokenStandard),
+	}
+	settlementCall(t, z, releaseWithdrawalsStep(g.User1.Address, 1), nil)
+	for _, user := range []types.Address{g.User2.Address, g.User3.Address, g.User4.Address} {
+		autoreceive(t, z, user)
+	}
+	z.InsertNewMomentum()
+	for user, want := range map[types.Address]int64{g.User2.Address: 100, g.User3.Address: 30, g.User4.Address: 10} {
+		if got := balanceOf(t, z, user, types.ZnnTokenStandard) - before[user]; got != want {
+			t.Fatalf("balance delta of %s: got %d want %d", user, got, want)
+		}
+	}
+	if c := w.counters(t); c.PendingWithdrawalReserve.Sign() != 0 || c.TotalReleased.Int64() != 140 {
+		t.Fatalf("counters after release: %+v", c)
+	}
+	if w.queued(t) != 0 {
+		t.Fatal("the queue is not drained")
+	}
+
+	// The empty queue fails before the rate limit applies, and a
+	// registered message stays registered.
+	settlementCall(t, z, releaseWithdrawalsStep(g.User1.Address, 1), constants.ErrNothingToWithdraw)
+	w.relay(t, 0, constants.ErrSettlementOutboxProcessed)
+}
+
+func TestSettlement_RelayMessage_RelayPauseHaltsRegistrationAndRelease(t *testing.T) {
+	w := newWithdrawalZenon(t)
+	z := w.z
+	w.finalize(t)
+	w.relay(t, 0, nil)
+	w.relay(t, 1, nil)
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 1, false, definition.PauseScopeRelay, true), nil)
+	w.relay(t, 2, constants.ErrSettlementRelayPaused)
+	settlementCall(t, z, releaseWithdrawalsStep(g.User1.Address, 1), constants.ErrSettlementRelayPaused)
+	if w.queued(t) != 2 {
+		t.Fatalf("expected 2 queued withdrawals, got %d", w.queued(t))
+	}
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 1, false, definition.PauseScopeRelay, false), nil)
+	// The rejected relay left its id free.
+	w.relay(t, 2, nil)
+
+	order := []types.Address{g.User2.Address, g.User4.Address, g.User3.Address}
+	call := z.CallContract(releaseWithdrawalsStep(g.User1.Address, 1))
+	z.InsertNewMomentum()
+	z.InsertNewMomentum()
+	call.Error(t, nil)
+
+	// The descendant sends appear in registration order.
+	sends := 0
+	var heights []uint64
+	for i, user := range order {
+		unreceived, err := api.NewLedgerApi(z).GetUnreceivedBlocksByAddress(user, 0, 50)
+		common.FailIfErr(t, err)
+		for _, b := range unreceived.List {
+			if b.AccountBlock.Address == types.SettlementContract {
+				sends++
+				heights = append(heights, b.AccountBlock.Height)
+				want := []int64{100, 10, 30}[i]
+				if b.AccountBlock.Amount.Int64() != want {
+					t.Fatalf("send to %s: amount %v want %d", user, b.AccountBlock.Amount, want)
+				}
+			}
+		}
+	}
+	if sends != 3 {
+		t.Fatalf("expected 3 sends, got %d", sends)
+	}
+	if !(heights[0] < heights[1] && heights[1] < heights[2]) {
+		t.Fatalf("send heights %v do not rise in registration order", heights)
+	}
+	if c := w.counters(t); c.PendingWithdrawalReserve.Sign() != 0 || c.TotalReleased.Int64() != 140 {
+		t.Fatalf("counters after release: %+v", c)
+	}
+}
+
+func TestSettlement_RelayMessage_RejectsBadInputs(t *testing.T) {
+	w := newWithdrawalZenon(t)
+	z := w.z
+	w.finalize(t)
+
+	// Unregistrable messages are rejected at send validation.
+	embedded := outboxMessage(hashFromByteForTest(0x77), 5, 0, types.SettlementContract, 5)
+	zero := outboxMessage(hashFromByteForTest(0x77), 6, 0, g.User4.Address, 0)
+	for _, m := range [][]byte{embedded, zero, embedded[:132]} {
+		settlementRejectedAtSend(z, relayMessageStep(g.User1.Address, 1, 0, m, []byte{0, 0, 0, 0}))
+	}
+	attached := relayMessageStep(g.User1.Address, 1, 0, w.leaves[0], w.proofs[0])
+	attached.Amount = big.NewInt(1)
+	z.InsertSendBlock(attached, constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+
+	// A valid proof relayed under another batch or domain, a wrong
+	// sibling and a count above the maximum depth are rejected.
+	settlementCall(t, z, relayMessageStep(g.User1.Address, 1, 1, w.leaves[0], w.proofs[0]), constants.ErrForbiddenParam)
+	settlementCall(t, z, relayMessageStep(g.User1.Address, 2, 0, w.leaves[0], w.proofs[0]), constants.ErrForbiddenParam)
+	wrong := append([]byte{}, w.proofs[0]...)
+	wrong[10] ^= 1
+	settlementCall(t, z, relayMessageStep(g.User1.Address, 1, 0, w.leaves[0], wrong), constants.ErrForbiddenParam)
+	settlementCall(t, z, relayMessageStep(g.User1.Address, 1, 0, w.leaves[0], append(append([]byte{}, w.proofs[0]...), 0)), constants.ErrForbiddenParam)
+	settlementCall(t, z, relayMessageStep(g.User1.Address, 1, 0, w.leaves[0], binary.BigEndian.AppendUint32(nil, 33)), constants.ErrForbiddenParam)
+	if w.queued(t) != 0 {
+		t.Fatal("a rejected relay queued a withdrawal")
+	}
+	w.relay(t, 0, nil)
+}
+
+func TestSettlement_ReleaseWithdrawals_EmptyQueueIsRejected(t *testing.T) {
+	w := newWithdrawalZenon(t)
+	settlementCall(t, w.z, releaseWithdrawalsStep(g.User1.Address, 1), constants.ErrNothingToWithdraw)
+	settlementCall(t, w.z, releaseWithdrawalsStep(g.User1.Address, 2), constants.ErrNothingToWithdraw)
 }
