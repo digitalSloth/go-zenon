@@ -27,6 +27,8 @@ const (
 	MaxOutboxPayloadSize           = 1024 * 8 // 8 KiB
 	MaxAssetsPerBatch              = 16
 	MaxWithdrawalsPerUpdate        = 16
+	ReleaseIntervalMomentums       = 1  // minimum momentums between a domain's accepted ReleaseWithdrawals calls
+	MaxMerkleProofDepth            = 32 // steps in one MerkleProof, for any batch root
 	MaxDeploySweepPerStart         = 2  // expired deploy starts swept per accepted start
 	MaxRecordSweepBatchesPerSubmit = 2  // finalized batches whose input records one accepted SubmitBatch deletes
 	FeeBurnShare                   = 30 // percent of each settled fee burned

@@ -282,13 +282,12 @@ var (
 	// bytes past the ABI-encoded arguments (Dynamic Plasma spork).
 	ErrABDataTrailingBytes = errors.New("account-block data has trailing bytes past ABI-encoded arguments")
 
-	// ErrNotImplemented rejects a Settlement method that has no
-	// implementation yet.
-	ErrNotImplemented                 = errors.New("not implemented")
-	ErrSettlementRelayPaused          = errors.New("settlement relay paused")
-	ErrSettlementSubmitPaused         = errors.New("settlement submit paused")
-	ErrSettlementFeeGuard             = errors.New("settlement fee guard violated")
-	ErrSettlementConservationViolated = errors.New("settlement conservation invariant violated")
-	ErrSettlementInvalidAssetFlow     = errors.New("settlement asset flow summary invalid")
-	ErrSettlementInputIndexExhausted  = errors.New("settlement input index exhausted")
+	ErrSettlementRelayPaused           = errors.New("settlement relay paused")
+	ErrSettlementSubmitPaused          = errors.New("settlement submit paused")
+	ErrSettlementFeeGuard              = errors.New("settlement fee guard violated")
+	ErrSettlementConservationViolated  = errors.New("settlement conservation invariant violated")
+	ErrSettlementInvalidAssetFlow      = errors.New("settlement asset flow summary invalid")
+	ErrSettlementInputIndexExhausted   = errors.New("settlement input index exhausted")
+	ErrSettlementOutboxProcessed       = errors.New("settlement outbox message already processed")
+	ErrSettlementWithdrawalCapExceeded = errors.New("settlement batch withdrawal cap exceeded")
 )
