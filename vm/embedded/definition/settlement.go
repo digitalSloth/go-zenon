@@ -90,6 +90,23 @@ const (
 		{"type":"function","name":"DeployContractFinalize","inputs":[
 			{"name":"domainId","type":"uint32"},
 			{"name":"codeHash","type":"hash"}]},
+		{"type":"function","name":"CallL2","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"targetContract","type":"hash"},
+			{"name":"plasmaLimit","type":"uint64"},
+			{"name":"payload","type":"bytes"}]},
+		{"type":"function","name":"UpgradeContract","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"contractId","type":"hash"},
+			{"name":"newCodeHash","type":"hash"}]},
+		{"type":"function","name":"TransferContractOwnership","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"contractId","type":"hash"},
+			{"name":"newOwner","type":"address"}]},
+		{"type":"function","name":"BuyStorage","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"contractId","type":"hash"},
+			{"name":"bytes","type":"uint64"}]},
 
 		{"type":"variable","name":"domainRecord","inputs":[
 			{"name":"domainClass","type":"uint8"},
@@ -304,15 +321,16 @@ const (
 	SettlementSubmitBatchMethodName        = "SubmitBatch"
 	SettlementRelayMessageMethodName       = "RelayMessage"
 
-	SettlementPauseMethodName = "Pause"
-	// declared for Tickets 11+, not yet wired
+	SettlementPauseMethodName  = "Pause"
 	SettlementCallL2MethodName = "CallL2"
 
 	SettlementDeployContractStartMethodName    = "DeployContractStart"
 	SettlementDeployContractChunkMethodName    = "DeployContractChunk"
 	SettlementDeployContractFinalizeMethodName = "DeployContractFinalize"
-	// declared for Tickets 11+, not yet wired
-	SettlementUpgradeContractMethodName = "UpgradeContract"
+	SettlementUpgradeContractMethodName        = "UpgradeContract"
+
+	SettlementTransferContractOwnershipMethodName = "TransferContractOwnership"
+	SettlementBuyStorageMethodName                = "BuyStorage"
 
 	domainRecordVariableName              = "domainRecord"
 	batchEntryVariableName                = "batchEntry"

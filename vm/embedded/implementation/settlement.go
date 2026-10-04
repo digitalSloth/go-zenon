@@ -1312,6 +1312,28 @@ type SettlementDepositParam struct {
 	PlasmaLimit    uint64
 }
 
+// custodyDeposit checks the asset is configured for the domain and
+// records the attached value in the custody counters. It returns the
+// asset id.
+func custodyDeposit(storage db.DB, domainId uint32, sendBlock *nom.AccountBlock) (types.Hash, error) {
+	assetId := definition.AssetIdFromZTS(sendBlock.TokenStandard)
+	if _, err := definition.GetAssetConfig(storage, domainId, assetId); err == constants.ErrDataNonExistent {
+		return types.Hash{}, constants.ErrInvalidToken
+	} else if err != nil {
+		return types.Hash{}, err
+	}
+
+	counters, err := definition.GetConservationCounters(storage, domainId, assetId)
+	if err != nil {
+		return types.Hash{}, err
+	}
+	counters.TotalDeposited = new(big.Int).Add(counters.TotalDeposited, sendBlock.Amount)
+	if err := saveCustodyCounters(storage, counters); err != nil {
+		return types.Hash{}, err
+	}
+	return assetId, nil
+}
+
 type SettlementDepositMethod struct{ MethodName string }
 
 func (p *SettlementDepositMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
@@ -1355,19 +1377,8 @@ func (p *SettlementDepositMethod) ReceiveBlock(context vm_context.AccountVmConte
 	}
 
 	storage := context.Storage()
-	assetId := definition.AssetIdFromZTS(sendBlock.TokenStandard)
-	if _, err := definition.GetAssetConfig(storage, param.DomainId, assetId); err == constants.ErrDataNonExistent {
-		return nil, constants.ErrInvalidToken
-	} else if err != nil {
-		return nil, err
-	}
-
-	counters, err := definition.GetConservationCounters(storage, param.DomainId, assetId)
+	assetId, err := custodyDeposit(storage, param.DomainId, sendBlock)
 	if err != nil {
-		return nil, err
-	}
-	counters.TotalDeposited = new(big.Int).Add(counters.TotalDeposited, sendBlock.Amount)
-	if err := saveCustodyCounters(storage, counters); err != nil {
 		return nil, err
 	}
 
@@ -2098,18 +2109,24 @@ func chargeBytecodeFee(storage db.DB, totalSize uint64, sendBlock *nom.AccountBl
 		return nil, err
 	}
 	fee := new(big.Int).Mul(new(big.Int).SetUint64(totalSize), config.ZnnPerByteOfBytecode)
-	if sendBlock.TokenStandard != types.ZnnTokenStandard || sendBlock.Amount.Cmp(fee) != 0 {
-		return nil, constants.ErrInvalidTokenOrAmount
-	}
-	counters, err := definition.GetFeeCounters(storage)
-	if err != nil {
-		return nil, err
-	}
-	counters.TotalFeesCollected = new(big.Int).Add(counters.TotalFeesCollected, fee)
-	if err := counters.Save(storage); err != nil {
+	if err := collectFee(storage, fee, sendBlock); err != nil {
 		return nil, err
 	}
 	return fee, nil
+}
+
+// collectFee requires the attachment to be exactly fee ZNN and adds it
+// to the collected-fee counter.
+func collectFee(storage db.DB, fee *big.Int, sendBlock *nom.AccountBlock) error {
+	if sendBlock.TokenStandard != types.ZnnTokenStandard || sendBlock.Amount.Cmp(fee) != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	counters, err := definition.GetFeeCounters(storage)
+	if err != nil {
+		return err
+	}
+	counters.TotalFeesCollected = new(big.Int).Add(counters.TotalFeesCollected, fee)
+	return counters.Save(storage)
 }
 
 type SettlementDeployStartParam struct {
@@ -2322,9 +2339,6 @@ func (p *SettlementDeployContractFinalizeMethod) ValidateSendBlock(block *nom.Ac
 	return err
 }
 
-// ReceiveBlock deletes the deploy record before it charges the fee. When
-// the fee check or admission fails, the VM rollback restores the record
-// and discards every write.
 func (p *SettlementDeployContractFinalizeMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
 	if err := p.ValidateSendBlock(sendBlock); err != nil {
 		return nil, err
@@ -2335,25 +2349,225 @@ func (p *SettlementDeployContractFinalizeMethod) ReceiveBlock(context vm_context
 		return nil, err
 	}
 
-	if _, err := getInputDomain(context, param.DomainId); err != nil {
-		return nil, err
+	return nil, finalizeDeployRecord(context, sendBlock, param.DomainId, param.CodeHash)
+}
+
+// finalizeDeployRecord deletes the deploy record before it charges the
+// fee. When the fee check or admission fails, the VM rollback restores
+// the record and discards every write.
+func finalizeDeployRecord(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock, domainId uint32, codeHash types.Hash) error {
+	if _, err := getInputDomain(context, domainId); err != nil {
+		return err
 	}
 
 	frontier, err := context.GetFrontierMomentum()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	storage := context.Storage()
-	record, err := consumeDeployRecord(storage, param.DomainId, sendBlock.Address, param.CodeHash, frontier.Height)
+	record, err := consumeDeployRecord(storage, domainId, sendBlock.Address, codeHash, frontier.Height)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	fee, err := chargeBytecodeFee(storage, record.TotalSize, sendBlock)
 	if err != nil {
+		return err
+	}
+	return admitInput(storage, domainId, types.ZeroHash, nil, fee)
+}
+
+type SettlementCallL2Param struct {
+	DomainId       uint32
+	TargetContract types.Hash
+	PlasmaLimit    uint64
+	Payload        []byte
+}
+type SettlementUpgradeContractParam struct {
+	DomainId    uint32
+	ContractId  types.Hash
+	NewCodeHash types.Hash
+}
+type SettlementTransferOwnershipParam struct {
+	DomainId   uint32
+	ContractId types.Hash
+	NewOwner   types.Address
+}
+type SettlementBuyStorageParam struct {
+	DomainId   uint32
+	ContractId types.Hash
+	Bytes      uint64
+}
+
+// SettlementCallL2Method records an L2 call, with optional value, as an
+// input.
+type SettlementCallL2Method struct{ MethodName string }
+
+func (p *SettlementCallL2Method) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementCallL2Method) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementCallL2Param)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if len(param.Payload) > constants.MaxCallPayload || !constants.IsInputGasInBounds(param.PlasmaLimit) {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.TargetContract, param.PlasmaLimit, param.Payload)
+	return err
+}
+func (p *SettlementCallL2Method) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
 		return nil, err
 	}
-	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, fee); err != nil {
+
+	param := new(SettlementCallL2Param)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
 		return nil, err
 	}
-	return nil, nil
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	storage := context.Storage()
+	if sendBlock.Amount.Sign() > 0 {
+		assetId, err := custodyDeposit(storage, param.DomainId, sendBlock)
+		if err != nil {
+			return nil, err
+		}
+		return nil, admitInput(storage, param.DomainId, assetId, sendBlock.Amount, nil)
+	}
+	return nil, admitInput(storage, param.DomainId, types.ZeroHash, nil, nil)
+}
+
+// SettlementUpgradeContractMethod consumes the sender's complete deploy
+// record for the new code hash and charges the bytecode fee.
+type SettlementUpgradeContractMethod struct{ MethodName string }
+
+func (p *SettlementUpgradeContractMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementUpgradeContractMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementUpgradeContractParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.TokenStandard != types.ZnnTokenStandard || block.Amount.Sign() <= 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.ContractId, param.NewCodeHash)
+	return err
+}
+
+// ReceiveBlock follows the same record-then-fee order as
+// DeployContractFinalize.
+func (p *SettlementUpgradeContractMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementUpgradeContractParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	return nil, finalizeDeployRecord(context, sendBlock, param.DomainId, param.NewCodeHash)
+}
+
+// SettlementTransferContractOwnershipMethod records an ownership
+// transfer as an input. A zero new owner renounces ownership.
+type SettlementTransferContractOwnershipMethod struct{ MethodName string }
+
+func (p *SettlementTransferContractOwnershipMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementTransferContractOwnershipMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementTransferOwnershipParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.ContractId, param.NewOwner)
+	return err
+}
+func (p *SettlementTransferContractOwnershipMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementTransferOwnershipParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+	return nil, admitInput(context.Storage(), param.DomainId, types.ZeroHash, nil, nil)
+}
+
+// SettlementBuyStorageMethod charges the per-byte state fee and records
+// the purchase as an input.
+type SettlementBuyStorageMethod struct{ MethodName string }
+
+func (p *SettlementBuyStorageMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementBuyStorageMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementBuyStorageParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.TokenStandard != types.ZnnTokenStandard || block.Amount.Sign() <= 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if param.Bytes == 0 {
+		return constants.ErrForbiddenParam
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.ContractId, param.Bytes)
+	return err
+}
+func (p *SettlementBuyStorageMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementBuyStorageParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+
+	if _, err := getInputDomain(context, param.DomainId); err != nil {
+		return nil, err
+	}
+
+	storage := context.Storage()
+	config, err := definition.GetPeripheryConfig(storage)
+	if err != nil {
+		return nil, err
+	}
+	fee := new(big.Int).Mul(new(big.Int).SetUint64(param.Bytes), config.ZnnPerByteOfState)
+	if err := collectFee(storage, fee, sendBlock); err != nil {
+		return nil, err
+	}
+	return nil, admitInput(storage, param.DomainId, types.ZeroHash, nil, fee)
 }
