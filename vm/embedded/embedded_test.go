@@ -124,6 +124,7 @@ func TestDumpContractsABIMethods(t *testing.T) {
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"Pause", "id":"ce23af21", "signature":"Pause(uint32,bool,uint8,bool)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"RegisterDomain", "id":"4e3b2f97", "signature":"RegisterDomain(uint32,uint8,uint8,hash,uint8,uint8,uint8,bytes,bytes,uint8,uint8,bytes,uint8,uint8,uint64,uint64)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"RegisterExecutor", "id":"b5a4c2d0", "signature":"RegisterExecutor(string,address)"}
+{"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"RelayMessage", "id":"c9f68fa9", "signature":"RelayMessage(uint32,uint64,bytes,bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"ReleaseWithdrawals", "id":"be97947e", "signature":"ReleaseWithdrawals(uint32)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetApprovedDAModes", "id":"4c927fe6", "signature":"SetApprovedDAModes(uint32,bytes)"}
 {"address":"z1qxemdeddedxsettlementxxxxxxxxxxqtmqrx9", "name":"SetAssetConfig", "id":"d0a6b72a", "signature":"SetAssetConfig(uint32,hash,uint256)"}

@@ -69,6 +69,11 @@ const (
 			{"name":"plasmaLimit","type":"uint64"}]},
 		{"type":"function","name":"SubmitBatch","inputs":[
 			{"name":"commitment","type":"bytes"}]},
+		{"type":"function","name":"RelayMessage","inputs":[
+			{"name":"domainId","type":"uint32"},
+			{"name":"batchId","type":"uint64"},
+			{"name":"message","type":"bytes"},
+			{"name":"inclusionProof","type":"bytes"}]},
 		{"type":"function","name":"DeployContractStart","inputs":[
 			{"name":"domainId","type":"uint32"},
 			{"name":"codeHash","type":"hash"},
@@ -167,6 +172,15 @@ const (
 		{"type":"variable","name":"releaseQueueMeta","inputs":[
 			{"name":"head","type":"uint64"},
 			{"name":"tail","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"releaseRateLimit","inputs":[
+			{"name":"height","type":"uint64"}
+		]},
+
+		{"type":"variable","name":"batchWithdrawalTotal","inputs":[
+			{"name":"contractAmount","type":"uint256"},
+			{"name":"refundAmount","type":"uint256"}
 		]},
 
 		{"type":"variable","name":"deployRecord","inputs":[
@@ -288,8 +302,7 @@ const (
 	SettlementSetApprovedDAModesMethodName = "SetApprovedDAModes"
 	SettlementDepositMethodName            = "Deposit"
 	SettlementSubmitBatchMethodName        = "SubmitBatch"
-	// declared for Tickets 11+, not yet wired
-	SettlementRelayMessageMethodName = "RelayMessage"
+	SettlementRelayMessageMethodName       = "RelayMessage"
 
 	SettlementPauseMethodName = "Pause"
 	// declared for Tickets 11+, not yet wired
@@ -312,6 +325,8 @@ const (
 	conservationCountersVariableName      = "conservationCounters"
 	releaseQueueEntryVariableName         = "releaseQueueEntry"
 	releaseQueueMetaVariableName          = "releaseQueueMeta"
+	releaseRateLimitVariableName          = "releaseRateLimit"
+	batchWithdrawalTotalVariableName      = "batchWithdrawalTotal"
 	deployRecordVariableName              = "deployRecord"
 	deployChunkVariableName               = "deployChunk"
 	deployStartQueueEntryVariableName     = "deployStartQueueEntry"
@@ -455,6 +470,8 @@ var (
 	deployStartQueueMetaKey      = []byte{0x1E} // DeployStartQueueMeta, singleton
 	domainInputCounterPrefix     = []byte{0x1F} // key: domainId (u32 BE)
 	domainInputOrdinalPrefix     = []byte{0x20} // key: domainId ‖ ordinal (u64 BE)
+	releaseRateLimitPrefix       = []byte{0x21} // key: domainId (u32 BE)
+	batchWithdrawalTotalPrefix   = []byte{0x22} // key: domainId ‖ batchId (u64 BE) ‖ assetId (32B)
 )
 
 func uint32ToBytesBE(v uint32) []byte {
@@ -1158,6 +1175,93 @@ func DequeueRelease(context db.DB, domainId uint32) (*ReleaseQueueEntry, error) 
 		return nil, err
 	}
 	return entry, nil
+}
+
+// ============================================================================
+// Release rate limit and per-batch withdrawal totals
+// ============================================================================
+
+// ReleaseRateLimit holds the height of the domain's last accepted
+// ReleaseWithdrawals. Height 0 means the domain has none.
+type ReleaseRateLimit struct {
+	DomainId uint32
+	Height   uint64
+}
+
+func getReleaseRateLimitKey(domainId uint32) []byte {
+	return common.JoinBytes(releaseRateLimitPrefix, uint32ToBytesBE(domainId))
+}
+
+func (r *ReleaseRateLimit) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(releaseRateLimitVariableName, r.Height)
+	if err != nil {
+		return err
+	}
+	return context.Put(getReleaseRateLimitKey(r.DomainId), data)
+}
+func GetReleaseRateLimit(context db.DB, domainId uint32) (*ReleaseRateLimit, error) {
+	data, err := context.Get(getReleaseRateLimitKey(domainId))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return &ReleaseRateLimit{DomainId: domainId}, nil
+	}
+	limit := new(ReleaseRateLimit)
+	if err := ABISettlement.UnpackVariable(limit, releaseRateLimitVariableName, data); err != nil {
+		return nil, err
+	}
+	limit.DomainId = domainId
+	return limit, nil
+}
+
+// BatchWithdrawalTotal holds a batch's registered withdrawals of one
+// asset: contract-emitted ones and runtime-emitted refunds, apart.
+type BatchWithdrawalTotal struct {
+	DomainId       uint32
+	BatchId        uint64
+	AssetId        types.Hash
+	ContractAmount *big.Int
+	RefundAmount   *big.Int
+}
+
+func getBatchWithdrawalTotalKey(domainId uint32, batchId uint64, assetId types.Hash) []byte {
+	return common.JoinBytes(batchWithdrawalTotalPrefix, uint32ToBytesBE(domainId), uint64ToBytesBE(batchId), assetId.Bytes())
+}
+
+func (t *BatchWithdrawalTotal) Save(context db.DB) error {
+	data, err := ABISettlement.PackVariable(
+		batchWithdrawalTotalVariableName,
+		t.ContractAmount,
+		t.RefundAmount,
+	)
+	if err != nil {
+		return err
+	}
+	return context.Put(getBatchWithdrawalTotalKey(t.DomainId, t.BatchId, t.AssetId), data)
+}
+func GetBatchWithdrawalTotal(context db.DB, domainId uint32, batchId uint64, assetId types.Hash) (*BatchWithdrawalTotal, error) {
+	data, err := context.Get(getBatchWithdrawalTotalKey(domainId, batchId, assetId))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return &BatchWithdrawalTotal{
+			DomainId:       domainId,
+			BatchId:        batchId,
+			AssetId:        assetId,
+			ContractAmount: big.NewInt(0),
+			RefundAmount:   big.NewInt(0),
+		}, nil
+	}
+	total := new(BatchWithdrawalTotal)
+	if err := ABISettlement.UnpackVariable(total, batchWithdrawalTotalVariableName, data); err != nil {
+		return nil, err
+	}
+	total.DomainId = domainId
+	total.BatchId = batchId
+	total.AssetId = assetId
+	return total, nil
 }
 
 // ============================================================================
