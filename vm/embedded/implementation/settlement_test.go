@@ -2749,3 +2749,181 @@ func TestSettlementRelayMessageValidateSendBlock(t *testing.T) {
 	expectErr(t, "malformed message", method.ValidateSendBlock(block(0, good[:132], nil)), constants.ErrForbiddenParam)
 	expectErr(t, "garbage data", method.ValidateSendBlock(&nom.AccountBlock{Amount: big.NewInt(0), Data: []byte{1, 2, 3}}), constants.ErrUnpackError)
 }
+
+type leafField struct {
+	name  string
+	width int
+}
+
+// splitLeaf cuts a canonical input leaf into named fields. A width of -1
+// is a length-prefixed Bytes field, and the slice holds the data only.
+func splitLeaf(t *testing.T, leaf []byte, fields []leafField) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	rest := leaf
+	for _, f := range fields {
+		width := f.width
+		if width == -1 {
+			if len(rest) < 4 {
+				t.Fatalf("field %s: leaf too short for a length prefix", f.name)
+			}
+			width = int(binary.BigEndian.Uint32(rest[:4]))
+			rest = rest[4:]
+		}
+		if width > len(rest) {
+			t.Fatalf("field %s: need %d bytes, have %d", f.name, width, len(rest))
+		}
+		out[f.name] = rest[:width]
+		rest = rest[width:]
+	}
+	if len(rest) != 0 {
+		t.Fatalf("%d trailing bytes after the last field", len(rest))
+	}
+	return out
+}
+
+func beUint32(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
+func beUint64(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }
+
+func TestInputMethods_MatchConformanceLeafFields(t *testing.T) {
+	elements := conformanceElements(t)
+	fill := func(b byte, n int) []byte { return bytes.Repeat([]byte{b}, n) }
+	hashOf := func(b byte) types.Hash { return types.BytesToHashPanic(fill(b, 32)) }
+	znnAsset := definition.AssetIdFromZTS(types.ZnnTokenStandard)
+	qsrAsset := definition.AssetIdFromZTS(types.QsrTokenStandard)
+	one := make([]byte, 32)
+	one[31] = 1
+	two := make([]byte, 32)
+	two[31] = 2
+	metadata := elements[2][len(elements[2])-23:]
+	head := []leafField{{"input_kind", 1}, {"source_account_block_hash", 32}}
+	owner, err := types.BytesToAddress(fill(0x21, 20))
+	common.FailIfErr(t, err)
+
+	rows := []struct {
+		name   string
+		method string
+		args   []interface{}
+		param  interface{}
+		tail   []leafField
+		// settle maps the unpacked param to its leaf fields
+		settle func(p interface{}) map[string][]byte
+	}{
+		{
+			name: "CallL2", method: definition.SettlementCallL2MethodName,
+			args:  []interface{}{uint32(1), hashOf(0x11), uint64(100), []byte("call")},
+			param: new(SettlementCallL2Param),
+			tail:  []leafField{{"target_contract", 32}, {"plasma_limit", 8}, {"deposit_asset", 32}, {"deposit_amount", 32}, {"payload", -1}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementCallL2Param)
+				return map[string][]byte{"target_contract": v.TargetContract.Bytes(), "plasma_limit": beUint64(v.PlasmaLimit), "payload": v.Payload,
+					"deposit_asset": znnAsset.Bytes(), "deposit_amount": one}
+			},
+		},
+		{
+			name: "Deposit", method: definition.SettlementDepositMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x13), uint64(200)},
+			param: new(SettlementDepositParam),
+			tail:  []leafField{{"target_contract", 32}, {"plasma_limit", 8}, {"deposit_asset", 32}, {"deposit_amount", 32}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementDepositParam)
+				return map[string][]byte{"target_contract": v.TargetContract.Bytes(), "plasma_limit": beUint64(v.PlasmaLimit),
+					"deposit_asset": qsrAsset.Bytes(), "deposit_amount": two}
+			},
+		},
+		{
+			name: "DeployContractStart", method: definition.SettlementDeployContractStartMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x15), types.HexToHashPanic("3b552fdc9b613ed4cc2668f65e6ede473caa412b1506deb0706848e7613ffa4f"), uint64(4096), uint32(2), metadata},
+			param: new(SettlementDeployStartParam),
+			tail:  []leafField{{"code_hash", 32}, {"metadata_hash", 32}, {"total_size", 8}, {"chunk_count", 4}, {"metadata", -1}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementDeployStartParam)
+				return map[string][]byte{"code_hash": v.CodeHash.Bytes(), "metadata_hash": v.MetadataHash.Bytes(), "total_size": beUint64(v.TotalSize),
+					"chunk_count": beUint32(v.ChunkCount), "metadata": v.Metadata}
+			},
+		},
+		{
+			name: "DeployContractChunk", method: definition.SettlementDeployContractChunkMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x18), uint32(0), hashOf(0x19), []byte{0x01}},
+			param: new(SettlementDeployChunkParam),
+			tail:  []leafField{{"code_hash", 32}, {"chunk_index", 4}, {"chunk_hash", 32}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementDeployChunkParam)
+				return map[string][]byte{"code_hash": v.CodeHash.Bytes(), "chunk_index": beUint32(v.ChunkIndex), "chunk_hash": v.ChunkHash.Bytes()}
+			},
+		},
+		{
+			name: "DeployContractFinalize", method: definition.SettlementDeployContractFinalizeMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x1b)},
+			param: new(SettlementDeployFinalizeParam),
+			tail:  []leafField{{"code_hash", 32}},
+			settle: func(p interface{}) map[string][]byte {
+				return map[string][]byte{"code_hash": p.(*SettlementDeployFinalizeParam).CodeHash.Bytes()}
+			},
+		},
+		{
+			name: "UpgradeContract", method: definition.SettlementUpgradeContractMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x1d), hashOf(0x1e)},
+			param: new(SettlementUpgradeContractParam),
+			tail:  []leafField{{"contract_id", 32}, {"new_code_hash", 32}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementUpgradeContractParam)
+				return map[string][]byte{"contract_id": v.ContractId.Bytes(), "new_code_hash": v.NewCodeHash.Bytes()}
+			},
+		},
+		{
+			name: "TransferContractOwnership", method: definition.SettlementTransferContractOwnershipMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x20), owner},
+			param: new(SettlementTransferOwnershipParam),
+			tail:  []leafField{{"contract_id", 32}, {"new_owner", 20}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementTransferOwnershipParam)
+				return map[string][]byte{"contract_id": v.ContractId.Bytes(), "new_owner": v.NewOwner.Bytes()}
+			},
+		},
+		{
+			name: "BuyStorage", method: definition.SettlementBuyStorageMethodName,
+			args:  []interface{}{uint32(1), hashOf(0x23), uint64(4096)},
+			param: new(SettlementBuyStorageParam),
+			tail:  []leafField{{"contract_id", 32}, {"bytes", 8}},
+			settle: func(p interface{}) map[string][]byte {
+				v := p.(*SettlementBuyStorageParam)
+				return map[string][]byte{"contract_id": v.ContractId.Bytes(), "bytes": beUint64(v.Bytes)}
+			},
+		},
+	}
+	if len(rows) != len(elements) {
+		t.Fatalf("expected %d rows, got %d", len(elements), len(rows))
+	}
+
+	for kind, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			data, err := definition.ABISettlement.PackMethod(row.method, row.args...)
+			if err != nil {
+				t.Fatalf("kind %d: pack: %v", kind, err)
+			}
+			if err := definition.ABISettlement.UnpackMethod(row.param, row.method, data); err != nil {
+				t.Fatalf("kind %d: unpack: %v", kind, err)
+			}
+			leaf := splitLeaf(t, elements[kind], append(append([]leafField{}, head...), row.tail...))
+			got := row.settle(row.param)
+			got["input_kind"] = []byte{byte(kind)}
+			got["source_account_block_hash"] = leaf["source_account_block_hash"]
+			for name := range leaf {
+				if _, ok := got[name]; !ok {
+					t.Errorf("kind %d: field %s is in the leaf but not in the method", kind, name)
+				}
+			}
+			for name, value := range got {
+				want, ok := leaf[name]
+				if !ok {
+					t.Errorf("kind %d: field %s is in the method but not in the leaf", kind, name)
+					continue
+				}
+				if !bytes.Equal(value, want) {
+					t.Errorf("kind %d: field %s: method %x, leaf %x", kind, name, value, want)
+				}
+			}
+		})
+	}
+}

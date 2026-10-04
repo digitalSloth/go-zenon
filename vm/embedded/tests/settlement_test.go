@@ -1795,6 +1795,7 @@ func TestSettlement_Deploy_Expiry(t *testing.T) {
 	advanceMomentums(t, z, constants.DeploymentExpiryWindow)
 	settlementCall(t, z, deployChunkStep(user, deployDomain, deployCodeHash, 0, payload), constants.ErrDataNonExistent)
 	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, 300), constants.ErrDataNonExistent)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, types.Hash{0x01}, deployCodeHash, types.ZnnTokenStandard, 300), constants.ErrDataNonExistent)
 	expectCounter(t, z, 2)
 	// an expired record stays stored until a start sweeps it
 	expectDeployRecord(t, z, user, deployCodeHash)
@@ -2346,4 +2347,389 @@ func TestSettlement_ReleaseWithdrawals_EmptyQueueIsRejected(t *testing.T) {
 	w := newWithdrawalZenon(t)
 	settlementCall(t, w.z, releaseWithdrawalsStep(g.User1.Address, 1), constants.ErrNothingToWithdraw)
 	settlementCall(t, w.z, releaseWithdrawalsStep(g.User1.Address, 2), constants.ErrNothingToWithdraw)
+}
+
+// ============================================================================
+// CallL2, UpgradeContract, TransferContractOwnership and BuyStorage
+// ============================================================================
+
+func callL2Step(from types.Address, zts types.ZenonTokenStandard, amount int64, domainId uint32, target types.Hash, plasmaLimit uint64, payload []byte) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementCallL2MethodName, domainId, target, plasmaLimit, payload)
+	block.TokenStandard = zts
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+func upgradeContractStep(from types.Address, domainId uint32, contractId, newCodeHash types.Hash, zts types.ZenonTokenStandard, amount int64) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementUpgradeContractMethodName, domainId, contractId, newCodeHash)
+	block.TokenStandard = zts
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+func transferOwnershipStep(from types.Address, domainId uint32, contractId types.Hash, newOwner types.Address, amount int64) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementTransferContractOwnershipMethodName, domainId, contractId, newOwner)
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+func buyStorageStep(from types.Address, domainId uint32, contractId types.Hash, size uint64, zts types.ZenonTokenStandard, amount int64) *nom.AccountBlock {
+	block := settlementStep(from, definition.SettlementBuyStorageMethodName, domainId, contractId, size)
+	block.TokenStandard = zts
+	block.Amount = big.NewInt(amount)
+	return block
+}
+
+func pauseDomain(t *testing.T, z mock.MockZenon, domainId uint32) {
+	t.Helper()
+	paused := phase1Domain(domainId)
+	paused.Status = definition.DomainStatusPaused
+	settlementCall(t, z, registerDomainStep(g.User5.Address, paused), nil)
+}
+
+// expectAssignedInput checks the asset, amount and fee of an assigned
+// index record. A nil stored amount or fee counts as zero.
+func expectAssignedInput(t *testing.T, z mock.MockZenon, domainId uint32, index uint64, asset types.Hash, amount, fee int64) {
+	t.Helper()
+	record, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), domainId, index)
+	common.FailIfErr(t, err)
+	if record.AssetId != asset {
+		t.Fatalf("index %d: expected asset %s, got %s", index, asset, record.AssetId)
+	}
+	gotAmount := big.NewInt(0)
+	if record.Amount != nil {
+		gotAmount = record.Amount
+	}
+	if gotAmount.Cmp(big.NewInt(amount)) != 0 {
+		t.Fatalf("index %d: expected amount %d, got %v", index, amount, record.Amount)
+	}
+	gotFee := big.NewInt(0)
+	if record.Fee != nil {
+		gotFee = record.Fee
+	}
+	if gotFee.Cmp(big.NewInt(fee)) != 0 {
+		t.Fatalf("index %d: expected fee %d, got %v", index, fee, record.Fee)
+	}
+}
+
+func TestSettlement_CallL2_WithAndWithoutValue(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1)
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	configureAsset(t, z, 1, znnAsset)
+	target := types.Hash{0x07}
+	user := g.User1.Address
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 0, 1, target, 5000, []byte("call")), nil)
+	expectCounter(t, z, 1)
+	expectAssignedInput(t, z, 1, 0, types.ZeroHash, 0, 0)
+	if got := totalDepositedOf(t, z, 1, znnAsset); got.Sign() != 0 {
+		t.Fatalf("expected TotalDeposited 0, got %v", got)
+	}
+	z.ExpectBalance(user, types.ZnnTokenStandard, start)
+
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 100, 1, target, 5000, []byte("call")), nil)
+	expectCounter(t, z, 2)
+	expectAssignedInput(t, z, 1, 1, znnAsset, 100, 0)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start-100)
+	if got := totalDepositedOf(t, z, 1, znnAsset); got.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("expected TotalDeposited 100, got %v", got)
+	}
+	total, err := definition.GetCumulativeDepositTotal(settlementStorage(t, z), 1, znnAsset)
+	common.FailIfErr(t, err)
+	if total.CumulativeDeposited.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("expected cumulative 100, got %v", total.CumulativeDeposited)
+	}
+}
+
+func TestSettlement_CallL2_ValueLessSkipsAssetConfig(t *testing.T) {
+	z := newSettlementZenon(t)
+	registerDomains(t, z, 1)
+
+	// no asset is configured, and a QSR token standard carries no value
+	settlementCall(t, z, callL2Step(g.User1.Address, types.QsrTokenStandard, 0, 1, types.Hash{0x07}, 0, nil), nil)
+	expectCounter(t, z, 1)
+	expectAssignedInput(t, z, 1, 0, types.ZeroHash, 0, 0)
+}
+
+func TestSettlement_CallL2_Rejections(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1)
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	configureAsset(t, z, 1, znnAsset)
+	target := types.Hash{0x07}
+	user := g.User1.Address
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+	startQsr := balanceOf(t, z, user, types.QsrTokenStandard)
+
+	expectUntouched := func() {
+		t.Helper()
+		autoreceive(t, z, user)
+		z.ExpectBalance(user, types.ZnnTokenStandard, start)
+		z.ExpectBalance(user, types.QsrTokenStandard, startQsr)
+		expectCounter(t, z, 0)
+		if got := totalDepositedOf(t, z, 1, znnAsset); got.Sign() != 0 {
+			t.Fatalf("expected TotalDeposited 0, got %v", got)
+		}
+		if _, err := definition.GetAssignedIndexRecord(settlementStorage(t, z), 1, 0); err != constants.ErrDataNonExistent {
+			t.Fatalf("expected no record, got %v", err)
+		}
+	}
+
+	settlementCall(t, z, callL2Step(user, types.QsrTokenStandard, 7, 1, target, 5000, nil), constants.ErrInvalidToken)
+	expectUntouched()
+
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 0, 9, target, 5000, nil), constants.ErrForbiddenParam)
+	expectUntouched()
+
+	pauseDomain(t, z, 1)
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 7, 1, target, 5000, nil), constants.ErrForbiddenParam)
+	expectUntouched()
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 0, 1, target, 5000, nil), constants.ErrForbiddenParam)
+	expectUntouched()
+}
+
+func TestSettlement_CallL2_SendValidation(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, 1)
+	user := g.User1.Address
+	target := types.Hash{0x07}
+
+	settlementRejectedAtSend(z, callL2Step(user, types.ZnnTokenStandard, 0, 1, target, 5000, make([]byte, constants.MaxCallPayload+1)))
+	settlementRejectedAtSend(z, callL2Step(user, types.ZnnTokenStandard, 0, 1, target, constants.MaxInputGas+1, nil))
+	expectCounter(t, z, 0)
+
+	exact := z.InsertSendBlock(callL2Step(user, types.ZnnTokenStandard, 0, 1, target, 0, make([]byte, constants.MaxCallPayload)), nil, mock.SkipVmChanges)
+	want := uint64(constants.AccountBlockBasePlasma + constants.ABByteDataPlasma*len(exact.Data))
+	if exact.BasePlasma != want {
+		t.Fatalf("expected base plasma %d for %d bytes, got %d", want, len(exact.Data), exact.BasePlasma)
+	}
+	z.InsertNewMomentum()
+	z.InsertNewMomentum()
+
+	// an empty payload and the maximum plasma limit are accepted
+	settlementCall(t, z, callL2Step(user, types.ZnnTokenStandard, 0, 1, target, constants.MaxInputGas, nil), nil)
+	expectCounter(t, z, 2)
+}
+
+func TestSettlement_CallL2_IgnoresPauseScopes(t *testing.T) {
+	z := newSettlementZenon(t)
+	registerDomains(t, z, 1)
+
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeSubmit, true), nil)
+	settlementCall(t, z, pauseStep(g.User5.Address, 0, true, definition.PauseScopeRelay, true), nil)
+	settlementCall(t, z, callL2Step(g.User1.Address, types.ZnnTokenStandard, 0, 1, types.Hash{0x07}, 1, nil), nil)
+	expectCounter(t, z, 1)
+}
+
+// completeDeploy starts a deployment of 100 bytes and sends its chunk.
+func completeDeploy(t *testing.T, z mock.MockZenon, from types.Address, codeHash types.Hash) {
+	t.Helper()
+	startDeploy(t, z, from, codeHash, 100)
+	sendChunks(t, z, from, codeHash, deployPayload(100), 0)
+}
+
+func TestSettlement_UpgradeContract_ConsumesOwnRecord(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	total := uint64(constants.MaxDeployChunkData + 100)
+	payload := deployPayload(int(total))
+	fee := int64(total) * 3
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	contractId := types.Hash{0x55}
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	startDeploy(t, z, user, deployCodeHash, total)
+	sendChunks(t, z, user, deployCodeHash, payload, 0, 1)
+	startHeight := expectDeployRecord(t, z, user, deployCodeHash).StartHeight
+	expectCounter(t, z, 3)
+
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, deployCodeHash, types.ZnnTokenStandard, fee), nil)
+	expectNoDeployRecord(t, z, user, deployCodeHash)
+	expectNoDeployChunk(t, z, user, deployCodeHash, startHeight, 0)
+	expectNoDeployChunk(t, z, user, deployCodeHash, startHeight, 1)
+	expectCounter(t, z, 4)
+	expectAssignedInput(t, z, deployDomain, 3, types.ZeroHash, 0, fee)
+	expectFeesCollected(t, z, fee)
+	z.ExpectBalance(user, types.ZnnTokenStandard, startBalance-fee)
+	if got := totalDepositedOf(t, z, deployDomain, znnAsset); got.Sign() != 0 {
+		t.Fatalf("expected TotalDeposited 0, got %v", got)
+	}
+
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, deployCodeHash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	expectCounter(t, z, 4)
+}
+
+func TestSettlement_UpgradeContract_Rejections(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	fee := int64(300)
+	contractId := types.Hash{0x55}
+	hash := deployCodeHash
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	expectUnchanged := func(counter uint64) {
+		t.Helper()
+		autoreceive(t, z, user)
+		z.ExpectBalance(user, types.ZnnTokenStandard, startBalance)
+		expectCounter(t, z, counter)
+		expectFeesCollected(t, z, 0)
+	}
+
+	// no record
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, hash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	expectUnchanged(0)
+
+	// only another deployer holds a complete record
+	completeDeploy(t, z, g.User2.Address, hash)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, hash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	if _, err := deployRecordOf(t, z, g.User2.Address, hash); err != nil {
+		t.Fatalf("expected the other deployer's record to stay, got %v", err)
+	}
+	expectUnchanged(2)
+
+	// incomplete record
+	total := uint64(constants.MaxDeployChunkData + 100)
+	incomplete := types.Hash{0xAA}
+	startDeploy(t, z, user, incomplete, total)
+	sendChunks(t, z, user, incomplete, deployPayload(int(total)), 1)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, incomplete, types.ZnnTokenStandard, int64(total)*3), constants.ErrForbiddenParam)
+	expectDeployRecord(t, z, user, incomplete)
+	expectUnchanged(4)
+
+	// wrong fee
+	completeDeploy(t, z, user, hash)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, hash, types.ZnnTokenStandard, fee-1), constants.ErrInvalidTokenOrAmount)
+	expectDeployRecord(t, z, user, hash)
+	expectUnchanged(6)
+
+	// QSR is rejected at send
+	z.InsertSendBlock(upgradeContractStep(user, deployDomain, contractId, hash, types.QsrTokenStandard, fee), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertSendBlock(upgradeContractStep(user, deployDomain, contractId, hash, types.ZnnTokenStandard, 0), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	expectDeployRecord(t, z, user, hash)
+
+	// a record consumed by finalize
+	settlementCall(t, z, deployFinalizeStep(user, deployDomain, hash, types.ZnnTokenStandard, fee), nil)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, hash, types.ZnnTokenStandard, fee), constants.ErrDataNonExistent)
+	expectCounter(t, z, 7)
+	expectFeesCollected(t, z, fee)
+
+	// a paused domain
+	other := types.Hash{0xBB}
+	completeDeploy(t, z, user, other)
+	pauseDomain(t, z, deployDomain)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, contractId, other, types.ZnnTokenStandard, fee), constants.ErrForbiddenParam)
+	expectDeployRecord(t, z, user, other)
+	expectCounter(t, z, 9)
+	expectFeesCollected(t, z, fee)
+}
+
+func TestSettlement_UpgradeContract_WithoutPeripheryConfig(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, deployDomain)
+	user := g.User1.Address
+	startBalance := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	completeDeploy(t, z, user, deployCodeHash)
+	settlementCall(t, z, upgradeContractStep(user, deployDomain, types.Hash{0x55}, deployCodeHash, types.ZnnTokenStandard, 300), constants.ErrDataNonExistent)
+	autoreceive(t, z, user)
+	z.ExpectBalance(user, types.ZnnTokenStandard, startBalance)
+	expectDeployRecord(t, z, user, deployCodeHash)
+	expectCounter(t, z, 2)
+	expectFeesCollected(t, z, 0)
+}
+
+func TestSettlement_TransferContractOwnership(t *testing.T) {
+	z := newSettlementZenon(t)
+	registerDomains(t, z, 1)
+	user := g.User1.Address
+	contractId := types.Hash{0x66}
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	settlementCall(t, z, transferOwnershipStep(user, 1, contractId, g.User2.Address, 0), nil)
+	expectCounter(t, z, 1)
+	expectAssignedInput(t, z, 1, 0, types.ZeroHash, 0, 0)
+
+	// a zero new owner renounces ownership
+	settlementCall(t, z, transferOwnershipStep(user, 1, contractId, types.Address{}, 0), nil)
+	expectCounter(t, z, 2)
+	expectAssignedInput(t, z, 1, 1, types.ZeroHash, 0, 0)
+
+	// an attached amount is rejected at send
+	z.InsertSendBlock(transferOwnershipStep(user, 1, contractId, g.User2.Address, 1), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	expectCounter(t, z, 2)
+
+	settlementCall(t, z, transferOwnershipStep(user, 9, contractId, g.User2.Address, 0), constants.ErrForbiddenParam)
+	pauseDomain(t, z, 1)
+	settlementCall(t, z, transferOwnershipStep(user, 1, contractId, g.User2.Address, 0), constants.ErrForbiddenParam)
+	expectCounter(t, z, 2)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start)
+}
+
+func TestSettlement_BuyStorage(t *testing.T) {
+	z := newDeployZenon(t)
+	user := g.User1.Address
+	contractId := types.Hash{0x77}
+	znnAsset := assetIdFor(types.ZnnTokenStandard)
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+	startQsr := balanceOf(t, z, user, types.QsrTokenStandard)
+
+	settlementCall(t, z, buyStorageStep(user, deployDomain, contractId, 50, types.ZnnTokenStandard, 50), nil)
+	expectCounter(t, z, 1)
+	expectAssignedInput(t, z, deployDomain, 0, types.ZeroHash, 0, 50)
+	expectFeesCollected(t, z, 50)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start-50)
+	if got := totalDepositedOf(t, z, deployDomain, znnAsset); got.Sign() != 0 {
+		t.Fatalf("expected TotalDeposited 0, got %v", got)
+	}
+
+	// the bytecode price is not the state price
+	settlementCall(t, z, buyStorageStep(user, deployDomain, contractId, 50, types.ZnnTokenStandard, 150), constants.ErrInvalidTokenOrAmount)
+	autoreceive(t, z, user)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start-50)
+	expectCounter(t, z, 1)
+	expectFeesCollected(t, z, 50)
+
+	// send validation
+	z.InsertSendBlock(buyStorageStep(user, deployDomain, contractId, 50, types.QsrTokenStandard, 50), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertSendBlock(buyStorageStep(user, deployDomain, contractId, 50, types.ZnnTokenStandard, 0), constants.ErrInvalidTokenOrAmount, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertSendBlock(buyStorageStep(user, deployDomain, contractId, 0, types.ZnnTokenStandard, 50), constants.ErrForbiddenParam, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.ExpectBalance(user, types.QsrTokenStandard, startQsr)
+	expectCounter(t, z, 1)
+
+	// an unregistered domain
+	settlementCall(t, z, buyStorageStep(user, 9, contractId, 50, types.ZnnTokenStandard, 50), constants.ErrForbiddenParam)
+	expectCounter(t, z, 1)
+
+	pauseDomain(t, z, deployDomain)
+	settlementCall(t, z, buyStorageStep(user, deployDomain, contractId, 50, types.ZnnTokenStandard, 50), constants.ErrForbiddenParam)
+	autoreceive(t, z, user)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start-50)
+	expectCounter(t, z, 1)
+	expectFeesCollected(t, z, 50)
+}
+
+func TestSettlement_BuyStorage_WithoutPeripheryConfig(t *testing.T) {
+	z := newSettlementZenon(t)
+	constants.MinSoftDelay = 10
+	registerDomains(t, z, deployDomain)
+	user := g.User1.Address
+	start := balanceOf(t, z, user, types.ZnnTokenStandard)
+
+	settlementCall(t, z, buyStorageStep(user, deployDomain, types.Hash{0x77}, 50, types.ZnnTokenStandard, 50), constants.ErrDataNonExistent)
+	autoreceive(t, z, user)
+	z.ExpectBalance(user, types.ZnnTokenStandard, start)
+	expectCounter(t, z, 0)
+	expectFeesCollected(t, z, 0)
 }
