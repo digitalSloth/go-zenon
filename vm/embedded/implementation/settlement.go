@@ -17,10 +17,6 @@ import (
 	"github.com/zenon-network/go-zenon/vm/vm_context"
 )
 
-var (
-	settlementLog = common.EmbeddedLogger.New("contract", "settlement")
-)
-
 // checkNetworkAdmin enforces the single global authority for admin-only
 // Settlement methods.
 func checkNetworkAdmin(sendBlock *nom.AccountBlock) error {
@@ -94,14 +90,16 @@ func burnBlocks(burn *big.Int) []*nom.AccountBlock {
 	}
 }
 
-// SettlementReleaseWithdrawalsMethod is the per-domain release crank. It carries
-// the domainId whose release queue it drains, so its rate limit applies per
-// domain: one domain's traffic cannot starve another domain's exits. The method
-// validates and dispatches; releasing queued withdrawals is not implemented.
+// SettlementReleaseWithdrawalsMethod is the per-domain release crank.
+// It carries the domainId whose release queue it drains, so its rate
+// limit applies per domain: one domain's traffic cannot starve another
+// domain's exits. Each accepted call pays out at most
+// constants.MaxWithdrawalsPerUpdate queued withdrawals in registration
+// order, one descendant send each.
 type SettlementReleaseWithdrawalsMethod struct{ MethodName string }
 
 func (p *SettlementReleaseWithdrawalsMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
-	return plasmaTable.EmbeddedSimple, nil
+	return plasmaTable.EmbeddedWWithdraw, nil
 }
 func (p *SettlementReleaseWithdrawalsMethod) ValidateSendBlock(block *nom.AccountBlock) error {
 	var err error
@@ -123,8 +121,15 @@ func (p *SettlementReleaseWithdrawalsMethod) ReceiveBlock(context vm_context.Acc
 		return nil, err
 	}
 
-	settlementLog.Debug("settlement method dispatched (not implemented)", "method", p.MethodName, "address", sendBlock.Address)
-	return nil, constants.ErrNotImplemented
+	domainId := new(uint32)
+	if err := definition.ABISettlement.UnpackMethod(domainId, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	return releaseWithdrawals(context.Storage(), frontier.Height, *domainId)
 }
 
 // valueCapWindow returns the rolling-window length carried in the first 8
@@ -1670,6 +1675,334 @@ func (p *SettlementSubmitBatchMethod) ReceiveBlock(context vm_context.AccountVmC
 		return nil, err
 	}
 	return nil, acceptBatch(context.Storage(), frontier.Height, activePillars, sendBlock.Address, entry)
+}
+
+// ============================================================================
+// RelayMessage and withdrawal release
+// ============================================================================
+
+const (
+	outboxWithdrawalSize = 133
+	outboxKindWithdrawal = 1
+	proofStepSize        = 33
+)
+
+type outboxWithdrawal struct {
+	SourceContract types.Hash
+	InputIndex     uint64
+	OutboxIndex    uint32
+	Recipient      types.Address
+	AssetId        types.Hash
+	Amount         *big.Int
+}
+
+// decodeOutboxWithdrawal decodes a registrable outbox message: kind 1,
+// empty payload, canonical asset, non-zero amount and a recipient that
+// is not an embedded contract. Layout, big-endian:
+// source_contract(32) ‖ input_index(8) ‖ outbox_index(4) ‖ kind(1) ‖
+// recipient(20) ‖ asset_id(32) ‖ amount(32) ‖ payload_len(4).
+func decodeOutboxWithdrawal(b []byte) (*outboxWithdrawal, error) {
+	if len(b) != outboxWithdrawalSize || b[44] != outboxKindWithdrawal {
+		return nil, constants.ErrForbiddenParam
+	}
+	if binary.BigEndian.Uint32(b[129:133]) != 0 {
+		return nil, constants.ErrForbiddenParam
+	}
+	w := &outboxWithdrawal{
+		InputIndex:  binary.BigEndian.Uint64(b[32:40]),
+		OutboxIndex: binary.BigEndian.Uint32(b[40:44]),
+		Amount:      new(big.Int).SetBytes(b[97:129]),
+	}
+	copy(w.SourceContract[:], b[0:32])
+	copy(w.Recipient[:], b[45:65])
+	copy(w.AssetId[:], b[65:97])
+	if _, err := definition.ZTSFromAssetId(w.AssetId); err != nil {
+		return nil, constants.ErrForbiddenParam
+	}
+	if w.Amount.Sign() == 0 {
+		return nil, constants.ErrForbiddenParam
+	}
+	// GetEmbeddedMethod gates on the same predicate and always rejects
+	// an empty-data send to an embedded address, so such a release
+	// could never be paid out.
+	if types.IsEmbeddedAddress(w.Recipient) {
+		return nil, constants.ErrForbiddenParam
+	}
+	return w, nil
+}
+
+// outboxProofRoot reconstructs the batch outbox root from the encoded
+// message and its proof: count:u32 BE, then count steps of side:u8 ‖
+// sibling:bytes32. Side 0 means the sibling is the left node, side 1
+// the right node. The leaf hash is always computed from leaf.
+func outboxProofRoot(leaf, proof []byte) (types.Hash, error) {
+	if len(proof) < 4 {
+		return types.Hash{}, constants.ErrForbiddenParam
+	}
+	count := uint64(binary.BigEndian.Uint32(proof[:4]))
+	if count > constants.MaxMerkleProofDepth {
+		return types.Hash{}, constants.ErrForbiddenParam
+	}
+	if uint64(len(proof)) != 4+count*proofStepSize {
+		return types.Hash{}, constants.ErrForbiddenParam
+	}
+
+	h := crypto.Hash([]byte{0x00}, leaf)
+	for i := uint64(0); i < count; i++ {
+		step := proof[4+i*proofStepSize : 4+(i+1)*proofStepSize]
+		sibling := step[1:]
+		switch step[0] {
+		case 0:
+			h = crypto.Hash([]byte{0x01}, sibling, h)
+		case 1:
+			h = crypto.Hash([]byte{0x01}, h, sibling)
+		default:
+			return types.Hash{}, constants.ErrForbiddenParam
+		}
+	}
+	return types.BytesToHashPanic(h), nil
+}
+
+// outboxId returns SHA3-256(domainId ‖ batchId ‖ inputIndex ‖
+// outboxIndex), big-endian.
+func outboxId(domainId uint32, batchId, inputIndex uint64, outboxIndex uint32) types.Hash {
+	b := make([]byte, 0, 24)
+	b = binary.BigEndian.AppendUint32(b, domainId)
+	b = binary.BigEndian.AppendUint64(b, batchId)
+	b = binary.BigEndian.AppendUint64(b, inputIndex)
+	b = binary.BigEndian.AppendUint32(b, outboxIndex)
+	return types.BytesToHashPanic(crypto.Hash(b))
+}
+
+// depositCreditOf returns the summary's deposit credit for assetId, or
+// 0 when the summary has no entry for it.
+func depositCreditOf(summary []byte, assetId types.Hash) (*big.Int, error) {
+	entries, err := decodeAssetFlowSummary(summary)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.AssetId == assetId {
+			return e.DepositCredit, nil
+		}
+	}
+	return big.NewInt(0), nil
+}
+
+// registerWithdrawal registers one outbox withdrawal of a finalized
+// batch: it reserves the amount in custody and appends the withdrawal
+// to the domain's release queue. The checks write nothing, so a
+// rejected registration records no outboxId.
+func registerWithdrawal(storage db.DB, height uint64, domainId uint32, batchId uint64, message, proof []byte) error {
+	w, err := decodeOutboxWithdrawal(message)
+	if err != nil {
+		return err
+	}
+
+	paused, err := definition.IsRelayPaused(storage, domainId)
+	if err != nil {
+		return err
+	}
+	if paused {
+		return constants.ErrSettlementRelayPaused
+	}
+
+	batch, err := definition.GetBatchEntry(storage, domainId, batchId)
+	if err == constants.ErrDataNonExistent {
+		return constants.ErrForbiddenParam
+	} else if err != nil {
+		return err
+	}
+	if !batch.IsFinalized(height) {
+		return constants.ErrForbiddenParam
+	}
+
+	root, err := outboxProofRoot(message, proof)
+	if err != nil || root != batch.OutboxRoot {
+		return constants.ErrForbiddenParam
+	}
+
+	id := outboxId(domainId, batchId, w.InputIndex, w.OutboxIndex)
+	processed, err := definition.IsOutboxProcessed(storage, id)
+	if err != nil {
+		return err
+	}
+	if processed {
+		return constants.ErrSettlementOutboxProcessed
+	}
+
+	total, err := definition.GetBatchWithdrawalTotal(storage, domainId, batchId, w.AssetId)
+	if err != nil {
+		return err
+	}
+	// A refund is runtime-emitted and bounded by the batch's deposit
+	// credit. A contract withdrawal is bounded by the asset's
+	// per-batch withdrawal cap.
+	var running *big.Int
+	var limit *big.Int
+	isRefund := w.SourceContract == types.ZeroHash
+	if isRefund {
+		running = total.RefundAmount
+		limit, err = depositCreditOf(batch.AssetFlowSummary, w.AssetId)
+		if err != nil {
+			return err
+		}
+	} else {
+		running = total.ContractAmount
+		config, err := definition.GetAssetConfig(storage, domainId, w.AssetId)
+		if err == constants.ErrDataNonExistent {
+			return constants.ErrForbiddenParam
+		} else if err != nil {
+			return err
+		}
+		limit = config.MaxBatchWithdrawal
+	}
+	running = new(big.Int).Add(running, w.Amount)
+	if running.Cmp(limit) > 0 {
+		return constants.ErrSettlementWithdrawalCapExceeded
+	}
+
+	counters, err := definition.GetConservationCounters(storage, domainId, w.AssetId)
+	if err != nil {
+		return err
+	}
+	counters.PendingWithdrawalReserve = new(big.Int).Add(counters.PendingWithdrawalReserve, w.Amount)
+	if err := saveCustodyCounters(storage, counters); err != nil {
+		return err
+	}
+
+	if isRefund {
+		total.RefundAmount = running
+	} else {
+		total.ContractAmount = running
+	}
+	if err := total.Save(storage); err != nil {
+		return err
+	}
+	if err := definition.SetProcessedOutbox(storage, id); err != nil {
+		return err
+	}
+	return definition.EnqueueRelease(storage, domainId, &definition.ReleaseQueueEntry{
+		Recipient: w.Recipient,
+		AssetId:   w.AssetId,
+		Amount:    w.Amount,
+		OutboxId:  id,
+	})
+}
+
+// releaseWithdrawals pays out up to constants.MaxWithdrawalsPerUpdate
+// queued withdrawals of the domain in registration order, one send
+// each, and stamps the domain's release rate limit.
+func releaseWithdrawals(storage db.DB, height uint64, domainId uint32) ([]*nom.AccountBlock, error) {
+	paused, err := definition.IsRelayPaused(storage, domainId)
+	if err != nil {
+		return nil, err
+	}
+	if paused {
+		return nil, constants.ErrSettlementRelayPaused
+	}
+
+	meta, err := definition.GetReleaseQueueMeta(storage, domainId)
+	if err != nil {
+		return nil, err
+	}
+	if meta.Head == meta.Tail {
+		return nil, constants.ErrNothingToWithdraw
+	}
+
+	limit, err := definition.GetReleaseRateLimit(storage, domainId)
+	if err != nil {
+		return nil, err
+	}
+	if limit.Height != 0 && height < limit.Height+constants.ReleaseIntervalMomentums {
+		return nil, constants.ErrUpdateTooRecent
+	}
+	limit.Height = height
+	if err := limit.Save(storage); err != nil {
+		return nil, err
+	}
+
+	sends := make([]*nom.AccountBlock, 0, constants.MaxWithdrawalsPerUpdate)
+	for i := 0; i < constants.MaxWithdrawalsPerUpdate; i++ {
+		entry, err := definition.DequeueRelease(storage, domainId)
+		if err == constants.ErrDataNonExistent {
+			break
+		} else if err != nil {
+			return nil, err
+		}
+
+		counters, err := definition.GetConservationCounters(storage, domainId, entry.AssetId)
+		if err != nil {
+			return nil, err
+		}
+		counters.PendingWithdrawalReserve = new(big.Int).Sub(counters.PendingWithdrawalReserve, entry.Amount)
+		counters.TotalReleased = new(big.Int).Add(counters.TotalReleased, entry.Amount)
+		if err := saveCustodyCounters(storage, counters); err != nil {
+			return nil, err
+		}
+
+		zts, err := definition.ZTSFromAssetId(entry.AssetId)
+		if err != nil {
+			return nil, err
+		}
+		sends = append(sends, &nom.AccountBlock{
+			Address:       types.SettlementContract,
+			ToAddress:     entry.Recipient,
+			BlockType:     nom.BlockTypeContractSend,
+			Amount:        entry.Amount,
+			TokenStandard: zts,
+			Data:          []byte{},
+		})
+	}
+	return sends, nil
+}
+
+type SettlementRelayMessageParam struct {
+	DomainId       uint32
+	BatchId        uint64
+	Message        []byte
+	InclusionProof []byte
+}
+
+// SettlementRelayMessageMethod registers one withdrawal from a
+// finalized batch's outbox, proven against the batch's outbox root.
+type SettlementRelayMessageMethod struct{ MethodName string }
+
+func (p *SettlementRelayMessageMethod) GetPlasma(plasmaTable *constants.PlasmaTable) (uint64, error) {
+	return plasmaTable.EmbeddedSimple, nil
+}
+func (p *SettlementRelayMessageMethod) ValidateSendBlock(block *nom.AccountBlock) error {
+	var err error
+	param := new(SettlementRelayMessageParam)
+
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, block.Data); err != nil {
+		return constants.ErrUnpackError
+	}
+
+	if block.Amount.Sign() != 0 {
+		return constants.ErrInvalidTokenOrAmount
+	}
+	if _, err := decodeOutboxWithdrawal(param.Message); err != nil {
+		return err
+	}
+
+	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName, param.DomainId, param.BatchId, param.Message, param.InclusionProof)
+	return err
+}
+func (p *SettlementRelayMessageMethod) ReceiveBlock(context vm_context.AccountVmContext, sendBlock *nom.AccountBlock) ([]*nom.AccountBlock, error) {
+	if err := p.ValidateSendBlock(sendBlock); err != nil {
+		return nil, err
+	}
+
+	param := new(SettlementRelayMessageParam)
+	if err := definition.ABISettlement.UnpackMethod(param, p.MethodName, sendBlock.Data); err != nil {
+		return nil, err
+	}
+	frontier, err := context.GetFrontierMomentum()
+	if err != nil {
+		return nil, err
+	}
+	return nil, registerWithdrawal(context.Storage(), frontier.Height, param.DomainId, param.BatchId, param.Message, param.InclusionProof)
 }
 
 // ============================================================================

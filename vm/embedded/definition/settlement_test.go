@@ -386,6 +386,8 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"deployStartQueueMeta":   deployStartQueueMetaKey,
 		"domainInputCounter":     domainInputCounterPrefix,
 		"domainInputOrdinal":     domainInputOrdinalPrefix,
+		"releaseRateLimit":       releaseRateLimitPrefix,
+		"batchWithdrawalTotal":   batchWithdrawalTotalPrefix,
 	}
 
 	seen := make(map[byte]string, len(prefixes))
@@ -1157,6 +1159,114 @@ func TestAssetId_RejectsNonCanonical(t *testing.T) {
 		id := types.HexToHashPanic(hexId)
 		if _, err := ZTSFromAssetId(id); err != constants.ErrForbiddenParam {
 			t.Fatalf("expected ErrForbiddenParam for %s, got %v", hexId, err)
+		}
+	}
+}
+
+func TestReleaseRateLimit_RoundTripAndDefault(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+
+	absent, err := GetReleaseRateLimit(memDb, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absent.DomainId != 3 || absent.Height != 0 {
+		t.Fatalf("expected zero-default rate limit, got %+v", absent)
+	}
+
+	if err := (&ReleaseRateLimit{DomainId: 3, Height: 912}).Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&ReleaseRateLimit{DomainId: 4, Height: 77}).Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetReleaseRateLimit(memDb, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DomainId != 3 || got.Height != 912 {
+		t.Fatalf("rate limit mismatch: %+v", got)
+	}
+	other, err := GetReleaseRateLimit(memDb, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Height != 77 {
+		t.Fatalf("domains must not share a rate limit record: %+v", other)
+	}
+}
+
+func TestBatchWithdrawalTotal_RoundTripAndDefault(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	asset := hashFromByte(0x31)
+
+	absent, err := GetBatchWithdrawalTotal(memDb, 1, 2, asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absent.ContractAmount.Sign() != 0 || absent.RefundAmount.Sign() != 0 ||
+		absent.DomainId != 1 || absent.BatchId != 2 || absent.AssetId != asset {
+		t.Fatalf("expected zero-default total, got %+v", absent)
+	}
+
+	big256 := new(big.Int).Lsh(big.NewInt(1), 200)
+	total := &BatchWithdrawalTotal{
+		DomainId: 1, BatchId: 2, AssetId: asset,
+		ContractAmount: big256,
+		RefundAmount:   big.NewInt(5),
+	}
+	if err := total.Save(memDb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetBatchWithdrawalTotal(memDb, 1, 2, asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContractAmount.Cmp(big256) != 0 || got.RefundAmount.Cmp(big.NewInt(5)) != 0 ||
+		got.DomainId != 1 || got.BatchId != 2 || got.AssetId != asset {
+		t.Fatalf("total mismatch: %+v", got)
+	}
+}
+
+func TestBatchWithdrawalTotal_KeyedPerDomainBatchAndAsset(t *testing.T) {
+	memDb := db.DisableNotFound(db.NewMemDB())
+	assetA, assetB := hashFromByte(0x41), hashFromByte(0x42)
+
+	save := func(domain uint32, batch uint64, asset types.Hash, contract, refund int64) {
+		t.Helper()
+		total := &BatchWithdrawalTotal{
+			DomainId: domain, BatchId: batch, AssetId: asset,
+			ContractAmount: big.NewInt(contract), RefundAmount: big.NewInt(refund),
+		}
+		if err := total.Save(memDb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(1, 0, assetA, 10, 1)
+	save(1, 1, assetA, 20, 2)
+	save(1, 0, assetB, 30, 3)
+	save(2, 0, assetA, 40, 4)
+
+	cases := []struct {
+		domain   uint32
+		batch    uint64
+		asset    types.Hash
+		contract int64
+		refund   int64
+	}{
+		{1, 0, assetA, 10, 1},
+		{1, 1, assetA, 20, 2},
+		{1, 0, assetB, 30, 3},
+		{2, 0, assetA, 40, 4},
+		{2, 1, assetA, 0, 0},
+	}
+	for _, c := range cases {
+		got, err := GetBatchWithdrawalTotal(memDb, c.domain, c.batch, c.asset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ContractAmount.Cmp(big.NewInt(c.contract)) != 0 || got.RefundAmount.Cmp(big.NewInt(c.refund)) != 0 {
+			t.Fatalf("(%d,%d,%x): got %v/%v want %d/%d", c.domain, c.batch, c.asset[:2], got.ContractAmount, got.RefundAmount, c.contract, c.refund)
 		}
 	}
 }
