@@ -156,7 +156,8 @@ const (
 		]},
 
 		{"type":"variable","name":"domainInputOrdinal","inputs":[
-			{"name":"globalInputIndex","type":"uint64"}
+			{"name":"globalInputIndex","type":"uint64"},
+			{"name":"sourceAccountBlockHash","type":"hash"}
 		]},
 
 		{"type":"variable","name":"receivedInputCounter","inputs":[
@@ -332,33 +333,33 @@ const (
 	SettlementTransferContractOwnershipMethodName = "TransferContractOwnership"
 	SettlementBuyStorageMethodName                = "BuyStorage"
 
-	domainRecordVariableName              = "domainRecord"
-	batchEntryVariableName                = "batchEntry"
-	inputSequenceCursorVariableName       = "inputSequenceCursor"
+	DomainRecordVariableName              = "domainRecord"
+	BatchEntryVariableName                = "batchEntry"
+	InputSequenceCursorVariableName       = "inputSequenceCursor"
 	receivedInputCounterVariableName      = "receivedInputCounter"
-	domainInputCounterVariableName        = "domainInputCounter"
-	domainInputOrdinalVariableName        = "domainInputOrdinal"
+	DomainInputCounterVariableName        = "domainInputCounter"
+	DomainInputOrdinalVariableName        = "domainInputOrdinal"
 	assignedIndexRecordVariableName       = "assignedIndexRecord"
 	cumulativeDepositTotalVariableName    = "cumulativeDepositTotal"
 	conservationCountersVariableName      = "conservationCounters"
 	releaseQueueEntryVariableName         = "releaseQueueEntry"
-	releaseQueueMetaVariableName          = "releaseQueueMeta"
+	ReleaseQueueMetaVariableName          = "releaseQueueMeta"
 	releaseRateLimitVariableName          = "releaseRateLimit"
 	batchWithdrawalTotalVariableName      = "batchWithdrawalTotal"
 	deployRecordVariableName              = "deployRecord"
 	deployChunkVariableName               = "deployChunk"
 	deployStartQueueEntryVariableName     = "deployStartQueueEntry"
 	deployStartQueueMetaVariableName      = "deployStartQueueMeta"
-	executorSetMemberVariableName         = "executorSetMember"
+	ExecutorSetMemberVariableName         = "executorSetMember"
 	peripheryConfigVariableName           = "peripheryConfig"
 	pendingFeeVariableName                = "pendingFee"
 	feeEpochVariableName                  = "feeEpoch"
 	feeCountersVariableName               = "feeCounters"
 	domainConfigVariableName              = "domainConfig"
-	assetConfigVariableName               = "assetConfig"
+	AssetConfigVariableName               = "assetConfig"
 	approvedDAModeSetVariableName         = "approvedDAModeSet"
 	domainCounterVariableName             = "domainCounter"
-	pauseStateVariableName                = "pauseState"
+	PauseStateVariableName                = "pauseState"
 	escapeHatchRecordVariableName         = "escapeHatchRecord"
 	assetRegistryEntryVariableName        = "assetRegistryEntry"
 	messageStateVariableName              = "messageState"
@@ -540,7 +541,7 @@ type DomainRecord struct {
 
 func (d *DomainRecord) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		domainRecordVariableName,
+		DomainRecordVariableName,
 		d.DomainClass,
 		d.RuntimeKind,
 		d.StfSpecHash,
@@ -578,7 +579,7 @@ func parseDomainRecord(key, data []byte) (*DomainRecord, error) {
 		return nil, constants.ErrDataNonExistent
 	}
 	record := new(DomainRecord)
-	if err := ABISettlement.UnpackVariable(record, domainRecordVariableName, data); err != nil {
+	if err := ABISettlement.UnpackVariable(record, DomainRecordVariableName, data); err != nil {
 		return nil, err
 	}
 	domainId, err := unmarshalDomainRecordKey(key)
@@ -640,7 +641,7 @@ func (b *BatchEntry) IsFinalized(height uint64) bool {
 
 func (b *BatchEntry) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		batchEntryVariableName,
+		BatchEntryVariableName,
 		b.ProtocolVersion,
 		b.FirstInputSeq,
 		b.LastInputSeq,
@@ -684,7 +685,7 @@ func parseBatchEntry(key, data []byte) (*BatchEntry, error) {
 		return nil, constants.ErrDataNonExistent
 	}
 	entry := new(BatchEntry)
-	if err := ABISettlement.UnpackVariable(entry, batchEntryVariableName, data); err != nil {
+	if err := ABISettlement.UnpackVariable(entry, BatchEntryVariableName, data); err != nil {
 		return nil, err
 	}
 	domainId, batchId, err := unmarshalBatchEntryKey(key)
@@ -718,12 +719,12 @@ type InputSequenceCursor struct {
 	SweptInputCount     uint64 // ordinals whose input records have been deleted
 }
 
-func getInputSequenceCursorKey(domainId uint32) []byte {
+func InputSequenceCursorKey(domainId uint32) []byte {
 	return common.JoinBytes(inputSequenceCursorPrefix, uint32ToBytesBE(domainId))
 }
 func (c *InputSequenceCursor) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		inputSequenceCursorVariableName,
+		InputSequenceCursorVariableName,
 		c.ConsumedInputCount,
 		c.NextBatchId,
 		c.RecordsSweptThrough,
@@ -732,17 +733,17 @@ func (c *InputSequenceCursor) Save(context db.DB) error {
 	if err != nil {
 		return err
 	}
-	return context.Put(getInputSequenceCursorKey(c.DomainId), data)
+	return context.Put(InputSequenceCursorKey(c.DomainId), data)
 }
 func GetInputSequenceCursor(context db.DB, domainId uint32) (*InputSequenceCursor, error) {
-	key := getInputSequenceCursorKey(domainId)
+	key := InputSequenceCursorKey(domainId)
 	if data, err := context.Get(key); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return &InputSequenceCursor{DomainId: domainId}, nil
 	} else {
 		cursor := new(InputSequenceCursor)
-		if err := ABISettlement.UnpackVariable(cursor, inputSequenceCursorVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(cursor, InputSequenceCursorVariableName, data); err != nil {
 			return nil, err
 		}
 		cursor.DomainId = domainId
@@ -759,27 +760,27 @@ type DomainInputCounter struct {
 	Count    uint64
 }
 
-func getDomainInputCounterKey(domainId uint32) []byte {
+func DomainInputCounterKey(domainId uint32) []byte {
 	return common.JoinBytes(domainInputCounterPrefix, uint32ToBytesBE(domainId))
 }
 func (c *DomainInputCounter) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		domainInputCounterVariableName,
+		DomainInputCounterVariableName,
 		c.Count,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(getDomainInputCounterKey(c.DomainId), data)
+	return context.Put(DomainInputCounterKey(c.DomainId), data)
 }
 func GetDomainInputCounter(context db.DB, domainId uint32) (*DomainInputCounter, error) {
-	if data, err := context.Get(getDomainInputCounterKey(domainId)); err != nil {
+	if data, err := context.Get(DomainInputCounterKey(domainId)); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return &DomainInputCounter{DomainId: domainId}, nil
 	} else {
 		counter := new(DomainInputCounter)
-		if err := ABISettlement.UnpackVariable(counter, domainInputCounterVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(counter, DomainInputCounterVariableName, data); err != nil {
 			return nil, err
 		}
 		counter.DomainId = domainId
@@ -788,36 +789,38 @@ func GetDomainInputCounter(context db.DB, domainId uint32) (*DomainInputCounter,
 }
 
 // DomainInputOrdinal maps the ordinal of a domain's input to its global
-// input index.
+// input index and the hash of the send Settlement accepted.
 type DomainInputOrdinal struct {
-	DomainId         uint32
-	Ordinal          uint64
-	GlobalInputIndex uint64
+	DomainId               uint32
+	Ordinal                uint64
+	GlobalInputIndex       uint64
+	SourceAccountBlockHash types.Hash
 }
 
-func (o *DomainInputOrdinal) key() []byte {
-	return common.JoinBytes(domainInputOrdinalPrefix, uint32ToBytesBE(o.DomainId), uint64ToBytesBE(o.Ordinal))
+func DomainInputOrdinalKey(domainId uint32, ordinal uint64) []byte {
+	return common.JoinBytes(domainInputOrdinalPrefix, uint32ToBytesBE(domainId), uint64ToBytesBE(ordinal))
 }
 func (o *DomainInputOrdinal) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		domainInputOrdinalVariableName,
+		DomainInputOrdinalVariableName,
 		o.GlobalInputIndex,
+		o.SourceAccountBlockHash,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(o.key(), data)
+	return context.Put(DomainInputOrdinalKey(o.DomainId, o.Ordinal), data)
 }
 func (o *DomainInputOrdinal) Delete(context db.DB) error {
-	return context.Delete(o.key())
+	return context.Delete(DomainInputOrdinalKey(o.DomainId, o.Ordinal))
 }
 func GetDomainInputOrdinal(context db.DB, domainId uint32, ordinal uint64) (*DomainInputOrdinal, error) {
 	o := &DomainInputOrdinal{DomainId: domainId, Ordinal: ordinal}
-	if data, err := context.Get(o.key()); err != nil {
+	if data, err := context.Get(DomainInputOrdinalKey(o.DomainId, o.Ordinal)); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return nil, constants.ErrDataNonExistent
-	} else if err := ABISettlement.UnpackVariable(o, domainInputOrdinalVariableName, data); err != nil {
+	} else if err := ABISettlement.UnpackVariable(o, DomainInputOrdinalVariableName, data); err != nil {
 		return nil, err
 	}
 	return o, nil
@@ -1105,7 +1108,7 @@ func GetReleaseQueueEntry(context db.DB, domainId uint32, registrationIndex uint
 	}
 }
 
-func getReleaseQueueMetaKey(domainId uint32) []byte {
+func ReleaseQueueMetaKey(domainId uint32) []byte {
 	return common.JoinBytes(releaseQueueMetaPrefix, uint32ToBytesBE(domainId))
 }
 
@@ -1117,24 +1120,24 @@ type ReleaseQueueMeta struct {
 
 func (m *ReleaseQueueMeta) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		releaseQueueMetaVariableName,
+		ReleaseQueueMetaVariableName,
 		m.Head,
 		m.Tail,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(getReleaseQueueMetaKey(m.DomainId), data)
+	return context.Put(ReleaseQueueMetaKey(m.DomainId), data)
 }
 func GetReleaseQueueMeta(context db.DB, domainId uint32) (*ReleaseQueueMeta, error) {
-	key := getReleaseQueueMetaKey(domainId)
+	key := ReleaseQueueMetaKey(domainId)
 	if data, err := context.Get(key); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return &ReleaseQueueMeta{DomainId: domainId, Head: 0, Tail: 0}, nil
 	} else {
 		meta := new(ReleaseQueueMeta)
-		if err := ABISettlement.UnpackVariable(meta, releaseQueueMetaVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(meta, ReleaseQueueMetaVariableName, data); err != nil {
 			return nil, err
 		}
 		meta.DomainId = domainId
@@ -1575,26 +1578,26 @@ func DequeueDeployStart(context db.DB) (*DeployStartQueueEntry, error) {
 // processedOutbox membership set
 // ============================================================================
 
-func getProcessedOutboxKey(outboxId types.Hash) []byte {
+func ProcessedOutboxKey(outboxId types.Hash) []byte {
 	return common.JoinBytes(processedOutboxPrefix, outboxId.Bytes())
 }
 
 // SetProcessedOutbox records outboxId as processed.
 func SetProcessedOutbox(context db.DB, outboxId types.Hash) error {
-	return context.Put(getProcessedOutboxKey(outboxId), []byte{1})
+	return context.Put(ProcessedOutboxKey(outboxId), []byte{1})
 }
 
 // IsOutboxProcessed reports whether outboxId has already been recorded as
 // processed.
 func IsOutboxProcessed(context db.DB, outboxId types.Hash) (bool, error) {
-	return context.Has(getProcessedOutboxKey(outboxId))
+	return context.Has(ProcessedOutboxKey(outboxId))
 }
 
 // ============================================================================
 // Executor set, periphery config, fee accounting
 // ============================================================================
 
-func getExecutorSetMemberKey(pillarName string) []byte {
+func ExecutorSetMemberKey(pillarName string) []byte {
 	return common.JoinBytes(executorSetMemberPrefix, types.NewHash([]byte(pillarName)).Bytes())
 }
 
@@ -1607,7 +1610,7 @@ type ExecutorSetMember struct {
 
 func (m *ExecutorSetMember) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		executorSetMemberVariableName,
+		ExecutorSetMemberVariableName,
 		m.PillarName,
 		m.ExecutorAddress,
 		m.RegistrationHeight,
@@ -1616,10 +1619,10 @@ func (m *ExecutorSetMember) Save(context db.DB) error {
 	if err != nil {
 		return err
 	}
-	return context.Put(getExecutorSetMemberKey(m.PillarName), data)
+	return context.Put(ExecutorSetMemberKey(m.PillarName), data)
 }
 func (m *ExecutorSetMember) Delete(context db.DB) error {
-	return context.Delete(getExecutorSetMemberKey(m.PillarName))
+	return context.Delete(ExecutorSetMemberKey(m.PillarName))
 }
 
 // GetExecutorSet returns every stored executor-set member.
@@ -1632,7 +1635,7 @@ func GetExecutorSet(context db.DB) ([]*ExecutorSetMember, error) {
 			continue
 		}
 		member := new(ExecutorSetMember)
-		if err := ABISettlement.UnpackVariable(member, executorSetMemberVariableName, iterator.Value()); err != nil {
+		if err := ABISettlement.UnpackVariable(member, ExecutorSetMemberVariableName, iterator.Value()); err != nil {
 			return nil, err
 		}
 		list = append(list, member)
@@ -1891,27 +1894,27 @@ type AssetConfig struct {
 	MaxBatchWithdrawal *big.Int
 }
 
-func getAssetConfigKey(domainId uint32, assetId types.Hash) []byte {
+func AssetConfigKey(domainId uint32, assetId types.Hash) []byte {
 	return common.JoinBytes(assetConfigPrefix, uint32ToBytesBE(domainId), assetId.Bytes())
 }
 func (c *AssetConfig) Save(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		assetConfigVariableName,
+		AssetConfigVariableName,
 		c.MaxBatchWithdrawal,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(getAssetConfigKey(c.DomainId, c.AssetId), data)
+	return context.Put(AssetConfigKey(c.DomainId, c.AssetId), data)
 }
 func GetAssetConfig(context db.DB, domainId uint32, assetId types.Hash) (*AssetConfig, error) {
-	if data, err := context.Get(getAssetConfigKey(domainId, assetId)); err != nil {
+	if data, err := context.Get(AssetConfigKey(domainId, assetId)); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return nil, constants.ErrDataNonExistent
 	} else {
 		config := new(AssetConfig)
-		if err := ABISettlement.UnpackVariable(config, assetConfigVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(config, AssetConfigVariableName, data); err != nil {
 			return nil, err
 		}
 		config.DomainId = domainId
@@ -1992,7 +1995,7 @@ type PauseState struct {
 
 func (p *PauseState) SaveGlobal(context db.DB) error {
 	data, err := ABISettlement.PackVariable(
-		pauseStateVariableName,
+		PauseStateVariableName,
 		p.SubmitPaused,
 		p.RelayPaused,
 	)
@@ -2008,36 +2011,36 @@ func GetGlobalPauseState(context db.DB) (*PauseState, error) {
 		return &PauseState{}, nil
 	} else {
 		state := new(PauseState)
-		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(state, PauseStateVariableName, data); err != nil {
 			return nil, err
 		}
 		return state, nil
 	}
 }
 
-func getDomainPauseStateKey(domainId uint32) []byte {
+func DomainPauseStateKey(domainId uint32) []byte {
 	return common.JoinBytes(domainPauseStatePrefix, uint32ToBytesBE(domainId))
 }
 func (p *PauseState) SaveDomain(context db.DB, domainId uint32) error {
 	data, err := ABISettlement.PackVariable(
-		pauseStateVariableName,
+		PauseStateVariableName,
 		p.SubmitPaused,
 		p.RelayPaused,
 	)
 	if err != nil {
 		return err
 	}
-	return context.Put(getDomainPauseStateKey(domainId), data)
+	return context.Put(DomainPauseStateKey(domainId), data)
 }
 func GetDomainPauseState(context db.DB, domainId uint32) (*PauseState, error) {
-	key := getDomainPauseStateKey(domainId)
+	key := DomainPauseStateKey(domainId)
 	if data, err := context.Get(key); err != nil {
 		return nil, err
 	} else if len(data) == 0 {
 		return &PauseState{}, nil
 	} else {
 		state := new(PauseState)
-		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, data); err != nil {
+		if err := ABISettlement.UnpackVariable(state, PauseStateVariableName, data); err != nil {
 			return nil, err
 		}
 		return state, nil
@@ -2093,7 +2096,7 @@ func IsRelayPausedAnywhere(context db.DB) (bool, error) {
 			continue
 		}
 		state := new(PauseState)
-		if err := ABISettlement.UnpackVariable(state, pauseStateVariableName, iterator.Value()); err != nil {
+		if err := ABISettlement.UnpackVariable(state, PauseStateVariableName, iterator.Value()); err != nil {
 			return false, err
 		}
 		if state.RelayPaused {
@@ -2307,4 +2310,10 @@ func GetValidityKeyRegistryEntry(context db.DB, verifyingKeyId types.Hash) (*Val
 		entry.VerifyingKeyId = verifyingKeyId
 		return entry, nil
 	}
+}
+
+// GlobalPauseStateKey returns a copy of the storage key of the global
+// pause state.
+func GlobalPauseStateKey() []byte {
+	return common.JoinBytes(globalPauseStateKey)
 }
