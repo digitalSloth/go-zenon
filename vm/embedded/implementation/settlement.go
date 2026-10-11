@@ -1155,8 +1155,9 @@ func getInputDomain(context vm_context.AccountVmContext, domainId uint32) (*defi
 // records the global index under the next ordinal of domainId's input
 // sequence and advances the domain counter. Callers run it only after
 // every receive check has passed. A nil amount or fee is
-// zero; an input without a deposit passes types.ZeroHash and nil.
-func admitInput(storage db.DB, domainId uint32, assetId types.Hash, amount, fee *big.Int) error {
+// zero; an input without a deposit passes types.ZeroHash and nil. The
+// ordinal entry also records sendHash, the hash of the accepted send.
+func admitInput(storage db.DB, domainId uint32, sendHash, assetId types.Hash, amount, fee *big.Int) error {
 	counter, err := definition.GetReceivedInputCounter(storage)
 	if err != nil {
 		return err
@@ -1182,7 +1183,7 @@ func admitInput(storage db.DB, domainId uint32, assetId types.Hash, amount, fee 
 	if err != nil {
 		return err
 	}
-	ordinal := &definition.DomainInputOrdinal{DomainId: domainId, Ordinal: domainCounter.Count, GlobalInputIndex: counter.Count}
+	ordinal := &definition.DomainInputOrdinal{DomainId: domainId, Ordinal: domainCounter.Count, GlobalInputIndex: counter.Count, SourceAccountBlockHash: sendHash}
 	if err := ordinal.Save(storage); err != nil {
 		return err
 	}
@@ -1382,7 +1383,7 @@ func (p *SettlementDepositMethod) ReceiveBlock(context vm_context.AccountVmConte
 		return nil, err
 	}
 
-	if err := admitInput(storage, param.DomainId, assetId, sendBlock.Amount, nil); err != nil {
+	if err := admitInput(storage, param.DomainId, sendBlock.Hash, assetId, sendBlock.Amount, nil); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -2231,7 +2232,7 @@ func (p *SettlementDeployContractStartMethod) ReceiveBlock(context vm_context.Ac
 	}); err != nil {
 		return nil, err
 	}
-	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, nil); err != nil {
+	if err := admitInput(storage, param.DomainId, sendBlock.Hash, types.ZeroHash, nil, nil); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -2310,7 +2311,7 @@ func (p *SettlementDeployContractChunkMethod) ReceiveBlock(context vm_context.Ac
 	if err := record.Save(storage); err != nil {
 		return nil, err
 	}
-	if err := admitInput(storage, param.DomainId, types.ZeroHash, nil, nil); err != nil {
+	if err := admitInput(storage, param.DomainId, sendBlock.Hash, types.ZeroHash, nil, nil); err != nil {
 		return nil, err
 	}
 	return nil, nil
@@ -2373,7 +2374,7 @@ func finalizeDeployRecord(context vm_context.AccountVmContext, sendBlock *nom.Ac
 	if err != nil {
 		return err
 	}
-	return admitInput(storage, domainId, types.ZeroHash, nil, fee)
+	return admitInput(storage, domainId, sendBlock.Hash, types.ZeroHash, nil, fee)
 }
 
 type SettlementCallL2Param struct {
@@ -2440,9 +2441,9 @@ func (p *SettlementCallL2Method) ReceiveBlock(context vm_context.AccountVmContex
 		if err != nil {
 			return nil, err
 		}
-		return nil, admitInput(storage, param.DomainId, assetId, sendBlock.Amount, nil)
+		return nil, admitInput(storage, param.DomainId, sendBlock.Hash, assetId, sendBlock.Amount, nil)
 	}
-	return nil, admitInput(storage, param.DomainId, types.ZeroHash, nil, nil)
+	return nil, admitInput(storage, param.DomainId, sendBlock.Hash, types.ZeroHash, nil, nil)
 }
 
 // SettlementUpgradeContractMethod consumes the sender's complete deploy
@@ -2518,7 +2519,7 @@ func (p *SettlementTransferContractOwnershipMethod) ReceiveBlock(context vm_cont
 	if _, err := getInputDomain(context, param.DomainId); err != nil {
 		return nil, err
 	}
-	return nil, admitInput(context.Storage(), param.DomainId, types.ZeroHash, nil, nil)
+	return nil, admitInput(context.Storage(), param.DomainId, sendBlock.Hash, types.ZeroHash, nil, nil)
 }
 
 // SettlementBuyStorageMethod charges the per-byte state fee and records
@@ -2569,5 +2570,5 @@ func (p *SettlementBuyStorageMethod) ReceiveBlock(context vm_context.AccountVmCo
 	if err := collectFee(storage, fee, sendBlock); err != nil {
 		return nil, err
 	}
-	return nil, admitInput(storage, param.DomainId, types.ZeroHash, nil, fee)
+	return nil, admitInput(storage, param.DomainId, sendBlock.Hash, types.ZeroHash, nil, fee)
 }

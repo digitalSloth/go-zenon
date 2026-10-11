@@ -532,10 +532,10 @@ func TestAdmitInput_AssignsConsecutiveIndices(t *testing.T) {
 	storage := feeTestStorage()
 	znn, qsr := znnAssetId(), qsrAssetId()
 
-	common.FailIfErr(t, admitInput(storage, 1, znn, big.NewInt(5), nil))
-	common.FailIfErr(t, admitInput(storage, 1, types.ZeroHash, nil, big.NewInt(2)))
-	common.FailIfErr(t, admitInput(storage, 2, qsr, big.NewInt(7), nil))
-	common.FailIfErr(t, admitInput(storage, 1, znn, big.NewInt(3), nil))
+	common.FailIfErr(t, admitInput(storage, 1, types.ZeroHash, znn, big.NewInt(5), nil))
+	common.FailIfErr(t, admitInput(storage, 1, types.ZeroHash, types.ZeroHash, nil, big.NewInt(2)))
+	common.FailIfErr(t, admitInput(storage, 2, types.ZeroHash, qsr, big.NewInt(7), nil))
+	common.FailIfErr(t, admitInput(storage, 1, types.ZeroHash, znn, big.NewInt(3), nil))
 
 	want := []struct {
 		domain uint32
@@ -575,7 +575,7 @@ func TestAdmitInput_RejectsExhaustedCounter(t *testing.T) {
 	storage := feeTestStorage()
 	common.FailIfErr(t, (&definition.ReceivedInputCounter{Count: math.MaxUint64}).Save(storage))
 
-	if err := admitInput(storage, 1, znnAssetId(), big.NewInt(5), nil); err != constants.ErrSettlementInputIndexExhausted {
+	if err := admitInput(storage, 1, types.ZeroHash, znnAssetId(), big.NewInt(5), nil); err != constants.ErrSettlementInputIndexExhausted {
 		t.Fatalf("expected ErrSettlementInputIndexExhausted, got %v", err)
 	}
 	if _, err := definition.GetAssignedIndexRecord(storage, 1, math.MaxUint64); err != constants.ErrDataNonExistent {
@@ -1249,19 +1249,29 @@ func TestSubmitBatchValidateSendBlock(t *testing.T) {
 
 func TestAdmitInput_AssignsDomainOrdinals(t *testing.T) {
 	storage := feeTestStorage()
-	for _, domain := range []uint32{1, 2, 1, 2, 1} {
-		common.FailIfErr(t, admitInput(storage, domain, types.ZeroHash, nil, nil))
+	for i, domain := range []uint32{1, 2, 1, 2, 1} {
+		common.FailIfErr(t, admitInput(storage, domain, deployTestHash(byte(i+1)), types.ZeroHash, nil, nil))
 	}
 
 	for _, w := range []struct {
 		domain  uint32
 		ordinal uint64
 		global  uint64
-	}{{1, 0, 0}, {1, 1, 2}, {1, 2, 4}, {2, 0, 1}, {2, 1, 3}} {
+		send    types.Hash
+	}{
+		{1, 0, 0, deployTestHash(1)},
+		{1, 1, 2, deployTestHash(3)},
+		{1, 2, 4, deployTestHash(5)},
+		{2, 0, 1, deployTestHash(2)},
+		{2, 1, 3, deployTestHash(4)},
+	} {
 		o, err := definition.GetDomainInputOrdinal(storage, w.domain, w.ordinal)
 		common.FailIfErr(t, err)
 		if o.GlobalInputIndex != w.global {
 			t.Fatalf("domain %d ordinal %d: got global %d want %d", w.domain, w.ordinal, o.GlobalInputIndex, w.global)
+		}
+		if o.SourceAccountBlockHash != w.send {
+			t.Fatalf("domain %d ordinal %d: got send hash %s want %s", w.domain, w.ordinal, o.SourceAccountBlockHash, w.send)
 		}
 	}
 	for domain, want := range map[uint32]uint64{1: 3, 2: 2} {
@@ -1300,7 +1310,7 @@ func batchStorage(t *testing.T) db.DB {
 func admitN(t *testing.T, storage db.DB, domain uint32, n int, fee int64) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		common.FailIfErr(t, admitInput(storage, domain, types.ZeroHash, nil, big.NewInt(fee)))
+		common.FailIfErr(t, admitInput(storage, domain, types.ZeroHash, types.ZeroHash, nil, big.NewInt(fee)))
 	}
 }
 
@@ -1361,12 +1371,12 @@ func TestAcceptBatch_AcceptsFirstAndChainedBatches(t *testing.T) {
 
 func TestAcceptBatch_AcceptsDepositSummary(t *testing.T) {
 	storage := batchStorage(t)
-	common.FailIfErr(t, admitInput(storage, batchDomain, znnAssetId(), big.NewInt(5), nil))
+	common.FailIfErr(t, admitInput(storage, batchDomain, types.ZeroHash, znnAssetId(), big.NewInt(5), nil))
 	summary := flowSummary(flowEntry(znnAssetId(), 5, 0))
 	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, summary: summary}))
 
 	bad := batchStorage(t)
-	common.FailIfErr(t, admitInput(bad, batchDomain, znnAssetId(), big.NewInt(5), nil))
+	common.FailIfErr(t, admitInput(bad, batchDomain, types.ZeroHash, znnAssetId(), big.NewInt(5), nil))
 	err := submitBatch(t, bad, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, summary: flowSummary(flowEntry(znnAssetId(), 4, 0))})
 	expectErr(t, "wrong credit", err, constants.ErrSettlementInvalidAssetFlow)
 }
@@ -1875,6 +1885,34 @@ var conformanceInputRootElements = []string{
 }
 
 const conformanceInputRoot = "47f19e1e068fa6f6ba7f62688536a8956f4d8d865a4e161e5e024e0f5ec3ad09"
+
+// conformanceInputRootProofs holds the SPEC 27.3 proof of each
+// conformanceInputRootElements entry against conformanceInputRoot.
+var conformanceInputRootProofs = []string{
+	"0000000301bad27f23307aa3d0ab3134bb6192ba42e5e00ecb2a63f6b121437085f0d729db019e87e462b8684c764b19c42fa659f68451a0eb13788a817d7d1b3497d7e5f56c0191ab666fb84cc441e3c26510e4f7e3566f7c97c0b0d29c291c57fa20829a856c",
+	"000000030002534b41423de8a759cc74313c7416d609cf1c91be0f0ec7476a2b5b83727bf1019e87e462b8684c764b19c42fa659f68451a0eb13788a817d7d1b3497d7e5f56c0191ab666fb84cc441e3c26510e4f7e3566f7c97c0b0d29c291c57fa20829a856c",
+	"000000030197b06e980d7a5746b84191b8580432538dd8a083fad850b70ebf24bc857b125300fa988aefe6268e86e8b2aabeeaff7cd6fc34a8604378f5ee4226612458ce7f0e0191ab666fb84cc441e3c26510e4f7e3566f7c97c0b0d29c291c57fa20829a856c",
+	"00000003003842f22d437726d20a5a3c644114cba60628fb071770fc320ef06fe6967fe08400fa988aefe6268e86e8b2aabeeaff7cd6fc34a8604378f5ee4226612458ce7f0e0191ab666fb84cc441e3c26510e4f7e3566f7c97c0b0d29c291c57fa20829a856c",
+	"0000000301193f6fd4fd18589de719e22c3eccb8db2c3cb4061b7b9b88813bedf60180249e01303e89f17f7f8bacf199ca8c195b883937aaf68a2e7459b61c13f414d382bbdc00bc09a63e6e3c8e724fa71a48e2940ed904134ec3e99533fe062f318c5653e43f",
+	"0000000300cdec3f0803be01ff35fd3a83eba49f3d1760b06b52b1e004bfc9e5b43a9a404a01303e89f17f7f8bacf199ca8c195b883937aaf68a2e7459b61c13f414d382bbdc00bc09a63e6e3c8e724fa71a48e2940ed904134ec3e99533fe062f318c5653e43f",
+	"0000000301cae89611400c4035d12c983ba07e12fca03b6f29f631cddd0576c07caebcabda00a7095013d68f4258af32cb2061e988a30f0834aa6dab50ee100f114f399fb38000bc09a63e6e3c8e724fa71a48e2940ed904134ec3e99533fe062f318c5653e43f",
+	"0000000300284b3238148cfa51d5f83cf23e392616e6427e3ce074cd3d23d9fbd37df5902200a7095013d68f4258af32cb2061e988a30f0834aa6dab50ee100f114f399fb38000bc09a63e6e3c8e724fa71a48e2940ed904134ec3e99533fe062f318c5653e43f",
+}
+
+// conformancePrefixRoot is the root over the first five
+// conformanceInputRootElements entries. Element 4 is promoted at two
+// consecutive levels.
+const conformancePrefixRoot = "074288b9fa53e780096e8e40fa3c8e6b90a3320e9451e6b74e6fc4f37a88ad36"
+
+// conformancePrefixProofs holds the proof of each of those five entries
+// against conformancePrefixRoot.
+var conformancePrefixProofs = []string{
+	"0000000301bad27f23307aa3d0ab3134bb6192ba42e5e00ecb2a63f6b121437085f0d729db019e87e462b8684c764b19c42fa659f68451a0eb13788a817d7d1b3497d7e5f56c01cdec3f0803be01ff35fd3a83eba49f3d1760b06b52b1e004bfc9e5b43a9a404a",
+	"000000030002534b41423de8a759cc74313c7416d609cf1c91be0f0ec7476a2b5b83727bf1019e87e462b8684c764b19c42fa659f68451a0eb13788a817d7d1b3497d7e5f56c01cdec3f0803be01ff35fd3a83eba49f3d1760b06b52b1e004bfc9e5b43a9a404a",
+	"000000030197b06e980d7a5746b84191b8580432538dd8a083fad850b70ebf24bc857b125300fa988aefe6268e86e8b2aabeeaff7cd6fc34a8604378f5ee4226612458ce7f0e01cdec3f0803be01ff35fd3a83eba49f3d1760b06b52b1e004bfc9e5b43a9a404a",
+	"00000003003842f22d437726d20a5a3c644114cba60628fb071770fc320ef06fe6967fe08400fa988aefe6268e86e8b2aabeeaff7cd6fc34a8604378f5ee4226612458ce7f0e01cdec3f0803be01ff35fd3a83eba49f3d1760b06b52b1e004bfc9e5b43a9a404a",
+	"0000000100bc09a63e6e3c8e724fa71a48e2940ed904134ec3e99533fe062f318c5653e43f",
+}
 
 // conformanceOutboxRejected is a withdrawal with a one-byte payload.
 const conformanceOutboxRejected = "30303030303030303030303030303030303030303030303030303030303030300000000000000000000000000101000000000000000000000000000000000000000000000000000000000000000000000000000000000014e66318c6318c6318c6000000000000000000000000000000000000000000000000000000000000000100000001ff"
@@ -2925,5 +2963,42 @@ func TestInputMethods_MatchConformanceLeafFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOutboxProofRoot_FrozenConformanceVector(t *testing.T) {
+	elements := conformanceElements(t)
+	if got := hex.EncodeToString(buildTestTree(elements[:5]).root().Bytes()); got != conformancePrefixRoot {
+		t.Fatalf("prefix tree root: got %s want %s", got, conformancePrefixRoot)
+	}
+
+	for _, list := range []struct {
+		name     string
+		elements [][]byte
+		proofs   []string
+		root     string
+	}{
+		{"eight elements", elements, conformanceInputRootProofs, conformanceInputRoot},
+		{"five elements", elements[:5], conformancePrefixProofs, conformancePrefixRoot},
+	} {
+		tree := buildTestTree(list.elements)
+		want := types.HexToHashPanic(list.root)
+		for i, e := range list.elements {
+			if got := hex.EncodeToString(tree.proof(i)); got != list.proofs[i] {
+				t.Fatalf("%s leaf %d: reference proof %s want %s", list.name, i, got, list.proofs[i])
+			}
+			frozen := mustHex(t, list.proofs[i])
+			got, err := outboxProofRoot(e, frozen)
+			common.FailIfErr(t, err)
+			if got != want {
+				t.Fatalf("%s leaf %d: proof root %s want %s", list.name, i, got, want)
+			}
+
+			tampered := append([]byte(nil), frozen...)
+			tampered[len(tampered)-1] ^= 0x01
+			if got, err := outboxProofRoot(e, tampered); err == nil && got == want {
+				t.Fatalf("%s leaf %d: tampered proof still reaches the root", list.name, i)
+			}
+		}
 	}
 }

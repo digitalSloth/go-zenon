@@ -1,7 +1,9 @@
 package definition
 
 import (
+	"encoding/hex"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/zenon-network/go-zenon/common/db"
@@ -465,7 +467,7 @@ func TestDomainInputOrdinal_RoundTripAndDelete(t *testing.T) {
 		t.Fatalf("expected ErrDataNonExistent, got %v", err)
 	}
 
-	ordinal := &DomainInputOrdinal{DomainId: 3, Ordinal: 2, GlobalInputIndex: 41}
+	ordinal := &DomainInputOrdinal{DomainId: 3, Ordinal: 2, GlobalInputIndex: 41, SourceAccountBlockHash: hashFromByte(0x5A)}
 	if err := ordinal.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +897,7 @@ func TestExecutorSet_SkipsEmptyValues(t *testing.T) {
 	if err := a.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
-	if err := memDb.Put(getExecutorSetMemberKey("pillar-tombstone"), []byte{}); err != nil {
+	if err := memDb.Put(ExecutorSetMemberKey("pillar-tombstone"), []byte{}); err != nil {
 		t.Fatal(err)
 	}
 	set, err := GetExecutorSet(memDb)
@@ -1128,7 +1130,7 @@ func TestIsRelayPausedAnywhere(t *testing.T) {
 
 func TestIsRelayPausedAnywhere_SkipsEmptyDomainValue(t *testing.T) {
 	memDb := db.DisableNotFound(db.NewMemDB())
-	if err := memDb.Put(getDomainPauseStateKey(5), []byte{}); err != nil {
+	if err := memDb.Put(DomainPauseStateKey(5), []byte{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := IsRelayPausedAnywhere(memDb)
@@ -1269,4 +1271,190 @@ func TestBatchWithdrawalTotal_KeyedPerDomainBatchAndAsset(t *testing.T) {
 			t.Fatalf("(%d,%d,%x): got %v/%v want %d/%d", c.domain, c.batch, c.asset[:2], got.ContractAmount, got.RefundAmount, c.contract, c.refund)
 		}
 	}
+}
+
+func TestExportedKeyBuilders_MatchPrefixTable(t *testing.T) {
+	h := hashFromByte(0xAA)
+	hHex := strings.Repeat("aa", 32)
+	a := addressFromByte(0x72)
+	aHex := hex.EncodeToString(a.Bytes())
+	pillarHex := hex.EncodeToString(types.NewHash([]byte("pillar-a")).Bytes())
+	record := DeployRecordKey{DomainId: 7, Deployer: a, CodeHash: h}
+
+	for _, row := range []struct {
+		name    string
+		got     []byte
+		wantHex string
+	}{
+		{"InputSequenceCursorKey", InputSequenceCursorKey(7), "03" + "00000007"},
+		{"DomainInputCounterKey", DomainInputCounterKey(7), "1f" + "00000007"},
+		{"DomainInputOrdinalKey", DomainInputOrdinalKey(7, 9), "20" + "00000007" + "0000000000000009"},
+		{"BatchEntryKey", (&BatchEntryKey{DomainId: 7, BatchId: 9}).Key(), "02" + "00000007" + "0000000000000009"},
+		{"ReleaseQueueMetaKey", ReleaseQueueMetaKey(7), "09" + "00000007"},
+		{"AssetConfigKey", AssetConfigKey(7, h), "16" + "00000007" + hHex},
+		{"GlobalPauseStateKey", GlobalPauseStateKey(), "12"},
+		{"DomainPauseStateKey", DomainPauseStateKey(7), "13" + "00000007"},
+		{"ExecutorSetMemberKey", ExecutorSetMemberKey("pillar-a"), "0c" + pillarHex},
+		{"ProcessedOutboxKey", ProcessedOutboxKey(h), "0b" + hHex},
+		{"DomainRecordKey", (&DomainRecordKey{DomainId: 7}).Key(), "01" + "00000007"},
+		{"AssignedIndexRecordKey", (&AssignedIndexRecordKey{DomainId: 7, GlobalInputIndex: 9}).Key(), "05" + "00000007" + "0000000000000009"},
+		{"ReleaseQueueEntryKey", (&ReleaseQueueEntryKey{DomainId: 7, RegistrationIndex: 9}).Key(), "08" + "00000007" + "0000000000000009"},
+		{"DeployRecordKey", record.Key(), "0a" + "00000007" + aHex + hHex},
+		{"DeployChunkKey", (&DeployChunkKey{DeployRecordKey: record, StartHeight: 11, ChunkIndex: 3}).Key(), "1c" + "00000007" + aHex + hHex + "000000000000000b" + "00000003"},
+	} {
+		if got := hex.EncodeToString(row.got); got != row.wantHex {
+			t.Errorf("%s: got %s want %s", row.name, got, row.wantHex)
+		}
+	}
+}
+
+func TestExportedVariableNames_DecodeEntries(t *testing.T) {
+	h := hashFromByte(0xAA)
+	a := addressFromByte(0x72)
+	newDb := func() db.DB { return db.DisableNotFound(db.NewMemDB()) }
+	raw := func(t *testing.T, store db.DB, key []byte) []byte {
+		t.Helper()
+		data, err := store.Get(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) == 0 {
+			t.Fatalf("no value stored under %x", key)
+		}
+		return data
+	}
+
+	t.Run("DomainRecord", func(t *testing.T) {
+		store := newDb()
+		in := &DomainRecord{DomainRecordKey: DomainRecordKey{DomainId: 7}, StfSpecHash: h, MinExecutors: 1, Status: DomainStatusPaused, ProfileConfig: []byte{}, ChainBinding: []byte{}, ValueCaps: []byte{}}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(DomainRecord)
+		if err := ABISettlement.UnpackVariable(out, DomainRecordVariableName, raw(t, store, in.Key())); err != nil {
+			t.Fatal(err)
+		}
+		if out.StfSpecHash != h || out.MinExecutors != 1 || out.Status != DomainStatusPaused {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("BatchEntry", func(t *testing.T) {
+		store := newDb()
+		in := &BatchEntry{BatchEntryKey: BatchEntryKey{DomainId: 7, BatchId: 9}, LastInputSeq: 12, PostStateRoot: h, ExecutorPillar: "pillar-a", FinalizeAtHeight: 30, AssetFlowSummary: []byte{}, ProofData: []byte{}}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(BatchEntry)
+		if err := ABISettlement.UnpackVariable(out, BatchEntryVariableName, raw(t, store, in.Key())); err != nil {
+			t.Fatal(err)
+		}
+		if out.LastInputSeq != 12 || out.PostStateRoot != h || out.ExecutorPillar != "pillar-a" || out.FinalizeAtHeight != 30 {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("InputSequenceCursor", func(t *testing.T) {
+		store := newDb()
+		in := &InputSequenceCursor{DomainId: 7, ConsumedInputCount: 1, NextBatchId: 2, RecordsSweptThrough: 3, SweptInputCount: 4}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(InputSequenceCursor)
+		if err := ABISettlement.UnpackVariable(out, InputSequenceCursorVariableName, raw(t, store, InputSequenceCursorKey(7))); err != nil {
+			t.Fatal(err)
+		}
+		out.DomainId = 7
+		if *out != *in {
+			t.Fatalf("got %+v want %+v", out, in)
+		}
+	})
+	t.Run("DomainInputCounter", func(t *testing.T) {
+		store := newDb()
+		in := &DomainInputCounter{DomainId: 7, Count: 5}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(DomainInputCounter)
+		if err := ABISettlement.UnpackVariable(out, DomainInputCounterVariableName, raw(t, store, DomainInputCounterKey(7))); err != nil {
+			t.Fatal(err)
+		}
+		if out.Count != 5 {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("DomainInputOrdinal", func(t *testing.T) {
+		store := newDb()
+		in := &DomainInputOrdinal{DomainId: 7, Ordinal: 9, GlobalInputIndex: 41, SourceAccountBlockHash: h}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(DomainInputOrdinal)
+		if err := ABISettlement.UnpackVariable(out, DomainInputOrdinalVariableName, raw(t, store, DomainInputOrdinalKey(7, 9))); err != nil {
+			t.Fatal(err)
+		}
+		if out.GlobalInputIndex != 41 || out.SourceAccountBlockHash != h {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("ReleaseQueueMeta", func(t *testing.T) {
+		store := newDb()
+		in := &ReleaseQueueMeta{DomainId: 7, Head: 2, Tail: 5}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(ReleaseQueueMeta)
+		if err := ABISettlement.UnpackVariable(out, ReleaseQueueMetaVariableName, raw(t, store, ReleaseQueueMetaKey(7))); err != nil {
+			t.Fatal(err)
+		}
+		if out.Head != 2 || out.Tail != 5 {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("ExecutorSetMember", func(t *testing.T) {
+		store := newDb()
+		in := &ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: a, RegistrationHeight: 12, Status: ExecutorStatusActive}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(ExecutorSetMember)
+		if err := ABISettlement.UnpackVariable(out, ExecutorSetMemberVariableName, raw(t, store, ExecutorSetMemberKey("pillar-a"))); err != nil {
+			t.Fatal(err)
+		}
+		if *out != *in {
+			t.Fatalf("got %+v want %+v", out, in)
+		}
+	})
+	t.Run("AssetConfig", func(t *testing.T) {
+		store := newDb()
+		in := &AssetConfig{DomainId: 7, AssetId: h, MaxBatchWithdrawal: big.NewInt(1000)}
+		if err := in.Save(store); err != nil {
+			t.Fatal(err)
+		}
+		out := new(AssetConfig)
+		if err := ABISettlement.UnpackVariable(out, AssetConfigVariableName, raw(t, store, AssetConfigKey(7, h))); err != nil {
+			t.Fatal(err)
+		}
+		if out.MaxBatchWithdrawal.Cmp(big.NewInt(1000)) != 0 {
+			t.Fatalf("got %+v", out)
+		}
+	})
+	t.Run("PauseState", func(t *testing.T) {
+		store := newDb()
+		if err := (&PauseState{SubmitPaused: true}).SaveGlobal(store); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&PauseState{RelayPaused: true}).SaveDomain(store, 7); err != nil {
+			t.Fatal(err)
+		}
+		global := new(PauseState)
+		if err := ABISettlement.UnpackVariable(global, PauseStateVariableName, raw(t, store, GlobalPauseStateKey())); err != nil {
+			t.Fatal(err)
+		}
+		domain := new(PauseState)
+		if err := ABISettlement.UnpackVariable(domain, PauseStateVariableName, raw(t, store, DomainPauseStateKey(7))); err != nil {
+			t.Fatal(err)
+		}
+		if !global.SubmitPaused || global.RelayPaused || domain.SubmitPaused || !domain.RelayPaused {
+			t.Fatalf("got global %+v domain %+v", global, domain)
+		}
+	})
 }
