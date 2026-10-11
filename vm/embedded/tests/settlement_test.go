@@ -10,6 +10,7 @@ import (
 
 	"github.com/zenon-network/go-zenon/common/crypto"
 	"github.com/zenon-network/go-zenon/common/db"
+	"github.com/zenon-network/go-zenon/common/trie"
 	"github.com/zenon-network/go-zenon/common/types"
 	"github.com/zenon-network/go-zenon/vm"
 	"github.com/zenon-network/go-zenon/vm/constants"
@@ -2732,4 +2733,114 @@ func TestSettlement_BuyStorage_WithoutPeripheryConfig(t *testing.T) {
 	z.ExpectBalance(user, types.ZnnTokenStandard, start)
 	expectCounter(t, z, 0)
 	expectFeesCollected(t, z, 0)
+}
+
+// sendSettlementInput inserts the send block, lets Settlement receive
+// it, and returns the hash of the inserted send.
+func sendSettlementInput(t *testing.T, z mock.MockZenon, block *nom.AccountBlock) types.Hash {
+	t.Helper()
+	sent := z.InsertSendBlock(block, nil, mock.SkipVmChanges)
+	z.InsertNewMomentum()
+	z.InsertNewMomentum()
+	return sent.Hash
+}
+
+func TestSettlement_OrdinalEntryNamesSend(t *testing.T) {
+	z := newDeployZenon(t)
+	configureAsset(t, z, deployDomain, assetIdFor(types.ZnnTokenStandard))
+	user := g.User1.Address
+	target := types.Hash{0x07}
+	codeA := types.Hash{0xA1}
+	codeB := types.Hash{0xB1}
+
+	var hashes []types.Hash
+	send := func(block *nom.AccountBlock) {
+		hashes = append(hashes, sendSettlementInput(t, z, block))
+	}
+	send(depositStep(user, types.ZnnTokenStandard, 100, deployDomain, target, 5000))
+	send(callL2Step(user, types.ZnnTokenStandard, 50, deployDomain, target, 5000, []byte("call")))
+	send(callL2Step(user, types.QsrTokenStandard, 0, deployDomain, target, 0, nil))
+	send(deployStartStep(user, deployDomain, codeA, 100, 1, nil))
+	send(deployChunkStep(user, deployDomain, codeA, 0, deployPayload(100)))
+	send(deployFinalizeStep(user, deployDomain, codeA, types.ZnnTokenStandard, 300))
+	send(deployStartStep(user, deployDomain, codeB, 100, 1, nil))
+	send(deployChunkStep(user, deployDomain, codeB, 0, deployPayload(100)))
+	send(upgradeContractStep(user, deployDomain, types.Hash{0x55}, codeB, types.ZnnTokenStandard, 300))
+	send(transferOwnershipStep(user, deployDomain, types.Hash{0x66}, g.User2.Address, 0))
+	send(buyStorageStep(user, deployDomain, types.Hash{0x77}, 50, types.ZnnTokenStandard, 50))
+
+	seen := map[types.Hash]bool{}
+	for _, h := range hashes {
+		if seen[h] {
+			t.Fatalf("send hash %s repeats", h)
+		}
+		seen[h] = true
+	}
+	for k, want := range hashes {
+		o, err := definition.GetDomainInputOrdinal(settlementStorage(t, z), deployDomain, uint64(k))
+		common.FailIfErr(t, err)
+		if o.GlobalInputIndex != uint64(k) {
+			t.Fatalf("ordinal %d: global index %d want %d", k, o.GlobalInputIndex, k)
+		}
+		if o.SourceAccountBlockHash != want {
+			t.Fatalf("ordinal %d: send hash %s want %s", k, o.SourceAccountBlockHash, want)
+		}
+	}
+
+	settlementCall(t, z, transferOwnershipStep(user, 9, types.Hash{0x66}, g.User2.Address, 0), constants.ErrForbiddenParam)
+	if _, err := definition.GetDomainInputOrdinal(settlementStorage(t, z), 9, 0); err != constants.ErrDataNonExistent {
+		t.Fatalf("rejected send: expected ErrDataNonExistent for domain 9, got %v", err)
+	}
+	if _, err := definition.GetDomainInputOrdinal(settlementStorage(t, z), deployDomain, uint64(len(hashes))); err != constants.ErrDataNonExistent {
+		t.Fatalf("rejected send: expected ErrDataNonExistent past the last ordinal, got %v", err)
+	}
+}
+
+func TestSettlement_GetProofVerifiesOrdinalEntry(t *testing.T) {
+	z := mock.NewMockZenon(t)
+	t.Cleanup(z.StopPanic)
+	activateStateRoot(t, z)
+	activateSporkByName(t, z, "spork-offchain-execution", types.OffchainExecutionSpork)
+	advanceMomentums(t, z, 10)
+
+	savedAdmin := types.NetworkAdmin
+	types.NetworkAdmin = g.User5.Address
+	t.Cleanup(func() { types.NetworkAdmin = savedAdmin })
+
+	registerDomains(t, z, 1)
+	h := sendSettlementInput(t, z, transferOwnershipStep(g.User1.Address, 1, types.Hash{0x66}, g.User2.Address, 0))
+
+	ledgerApi := api.NewLedgerApi(z)
+	m, err := ledgerApi.GetFrontierMomentum()
+	common.FailIfErr(t, err)
+	if m.Version != nom.StateRootMomentumVersion {
+		t.Fatalf("frontier momentum version %d want %d", m.Version, nom.StateRootMomentumVersion)
+	}
+
+	rawKey := common.JoinBytes([]byte{0x03}, types.SettlementContract.Bytes(), []byte{0x04}, definition.DomainInputOrdinalKey(1, 0))
+	resp, err := ledgerApi.GetProof(m.Height, rawKey)
+	common.FailIfErr(t, err)
+	if resp.Root != m.StateRoot {
+		t.Fatalf("proof root %s != header StateRoot %s", resp.Root, m.StateRoot)
+	}
+	if len(resp.Value) == 0 {
+		t.Fatalf("proof carries no value")
+	}
+	ok, err := trie.VerifyProofByPath(m.StateRoot, trie.Path(types.NewHash(rawKey)), resp.Value, resp.Proof)
+	common.FailIfErr(t, err)
+	if !ok {
+		t.Fatalf("proof does not verify against the header StateRoot")
+	}
+
+	o := new(definition.DomainInputOrdinal)
+	common.FailIfErr(t, definition.ABISettlement.UnpackVariable(o, definition.DomainInputOrdinalVariableName, resp.Value))
+	if o.GlobalInputIndex != 0 || o.SourceAccountBlockHash != h {
+		t.Fatalf("decoded entry %+v, want global index 0 and send hash %s", o, h)
+	}
+
+	tampered := append([]byte(nil), resp.Value...)
+	tampered[len(tampered)-1] ^= 0x01
+	if ok, _ := trie.VerifyProofByPath(m.StateRoot, trie.Path(types.NewHash(rawKey)), tampered, resp.Proof); ok {
+		t.Fatalf("proof verifies a tampered value")
+	}
 }
