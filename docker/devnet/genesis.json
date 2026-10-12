@@ -146,6 +146,13 @@
                 "description": "Activates the Merkle state root",
                 "activated": true,
                 "enforcementHeight": 40
+            },
+            {
+                "id": "0000000000000000000000000000000000000000000000000000000000000004",
+                "name": "offchain-execution",
+                "description": "Activates the Settlement contract",
+                "activated": true,
+                "enforcementHeight": 50
             }
         ]
     },
