@@ -63,6 +63,17 @@ an activated spork between restarts).
 `make devnet-up` does **not** start the sync node — it lives behind the
 `sync` compose profile. See [Sync node](#sync-node-late-joiner) below.
 
+## Devnet build
+
+The devnet image builds `znnd` with the `devnet` build tag (`go build -tags devnet` in `docker/devnet/Dockerfile`, which `docker-compose.yml` builds). The tag compiles two files that change four values:
+
+- `common/types/address_devnet.go` makes dev address index 1 (`z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d`) the network admin, the only address that may call the Settlement contract's admin methods.
+- `vm/constants/embedded_devnet.go` shortens the administrator delay to 12 momenta and the soft delay to 6 momenta (2 epochs and 1 epoch on mainnet), so a two-step admin call completes in minutes. It also sets the minimum withdrawal delay to 30 momenta (1 epoch on mainnet), so a devnet batch finalizes about 5 minutes after acceptance.
+
+The genesis activates the Settlement contract with the `offchain-execution` spork at height 50, after `merkle-state-root` at 40.
+
+A build without the tag, such as `make znnd`, keeps the mainnet admin and delays; `TestDefaultBuildHasNoDevnetOverrides` in `vm/constants` checks this. The index 1 key derives from the public devnet mnemonic below: never run a `devnet` build on any other network.
+
 ## Sync node (late joiner)
 
 The `syncnode` service is a cold, non-producing node used to watch how a
@@ -205,10 +216,12 @@ mnemonic: abstract affair idle position alien fluid board ordinary exist afraid 
 password: devnet
 ```
 
+`password: devnet` is the keystore password, not the BIP-39 passphrase. The addresses below derive with the empty BIP-39 passphrase.
+
 | Index | Address                                          | Role                                  | Genesis balance              |
 |-------|--------------------------------------------------|---------------------------------------|------------------------------|
 | 0     | `z1qq9n7fpaqd8lpcljandzmx4xtku9w4ftwyg0mq`       | Pillar 1 producer (lives in pillar)   | —                            |
-| 1     | `z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d`       | Pillar 1 owner / general dev wallet   | 10,000 ZNN, 100,000 QSR      |
+| 1     | `z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d`       | Pillar 1 owner / general dev wallet / network admin (devnet build) | 10,000 ZNN, 100,000 QSR      |
 | 2     | `z1qzmzssx28dc0fmvlca05hyxk2kgkgu7n0cj8pl`       | Spork address                         | —                            |
 | 3     | `z1qp3yph55qgresyytz83anynr2f4z39x2z3ej3e`       | General dev account 1                 | 50,000 ZNN, 500,000 QSR      |
 | 4     | `z1qz9zr5c7a0p8qljvrwt2cy5j99w98c5myrn2un`       | Pillar 2 producer (lives in pillar2)  | —                            |
