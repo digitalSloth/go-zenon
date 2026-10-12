@@ -1370,6 +1370,28 @@ func GetDeployRecord(context db.DB, domainId uint32, deployer types.Address, cod
 	}
 }
 
+// GetDeployRecordsByDeployer returns every deploy record of deployer in
+// domainId in ascending codeHash order.
+func GetDeployRecordsByDeployer(context db.DB, domainId uint32, deployer types.Address) ([]*DeployRecord, error) {
+	iterator := context.NewIterator(common.JoinBytes(deployRecordPrefix, uint32ToBytesBE(domainId), deployer.Bytes()))
+	defer iterator.Release()
+	list := make([]*DeployRecord, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		record, err := parseDeployRecord(iterator.Key(), iterator.Value())
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, record)
+	}
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return list, nil
+}
+
 // ============================================================================
 // Deploy chunk entries (one per received chunk of an attempt)
 // ============================================================================
@@ -2045,6 +2067,35 @@ func GetDomainPauseState(context db.DB, domainId uint32) (*PauseState, error) {
 		}
 		return state, nil
 	}
+}
+
+// DomainPauseState is a stored per-domain pause record with its domainId.
+type DomainPauseState struct {
+	DomainId uint32
+	PauseState
+}
+
+// GetDomainPauseStates returns every stored per-domain pause record in
+// ascending domainId order.
+func GetDomainPauseStates(context db.DB) ([]*DomainPauseState, error) {
+	iterator := context.NewIterator(domainPauseStatePrefix)
+	defer iterator.Release()
+	list := make([]*DomainPauseState, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		state := new(DomainPauseState)
+		if err := ABISettlement.UnpackVariable(&state.PauseState, PauseStateVariableName, iterator.Value()); err != nil {
+			return nil, err
+		}
+		state.DomainId = bytesBEToUint32(iterator.Key()[1:5])
+		list = append(list, state)
+	}
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return list, nil
 }
 
 // IsSubmitPaused reports whether SUBMIT is paused globally or for domainId.
