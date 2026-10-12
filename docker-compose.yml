@@ -2,7 +2,7 @@ services:
   pillar:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/devnet/Dockerfile
     image: go-zenon-devnet:latest
     container_name: znnd-devnet-pillar
     restart: unless-stopped
