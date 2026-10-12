@@ -642,6 +642,28 @@ func GetTimeChallengeInfoVariable(context db.DB, methodName string) (*TimeChalle
 		return upd, err
 	}
 }
+
+// GetAllTimeChallengeInfos returns every stored time challenge, including
+// applied ones (zero ParamsHash).
+func GetAllTimeChallengeInfos(context db.DB) ([]*TimeChallengeInfo, error) {
+	iterator := context.NewIterator(TimeChallengeKeyPrefix)
+	defer iterator.Release()
+	list := make([]*TimeChallengeInfo, 0)
+	for iterator.Next() {
+		if len(iterator.Value()) == 0 {
+			continue
+		}
+		info, err := parseTimeChallengeInfoVariable(iterator.Value())
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, info)
+	}
+	if iterator.Error() != nil {
+		return nil, iterator.Error()
+	}
+	return list, nil
+}
 func (t *TimeChallengeInfo) Key() []byte {
 	return common.JoinBytes(TimeChallengeKeyPrefix, crypto.Hash([]byte(t.MethodName)))
 }
