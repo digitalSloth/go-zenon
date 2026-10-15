@@ -544,6 +544,10 @@ func (ctx *testPtlcContext) IsPtlcSporkEnforced() bool {
 	return true
 }
 
+func (ctx *testPtlcContext) IsOffchainExecutionSporkEnforced() bool {
+	return false
+}
+
 func (ctx *testPtlcContext) GetPillarWeights() (map[string]*big.Int, error) {
 	return nil, nil
 }
