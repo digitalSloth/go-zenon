@@ -83,15 +83,14 @@ type domainParams struct {
 	ChainBinding        []byte
 	MinExecutors        uint8
 	ProposerPolicy      uint8
-	ValueCaps           []byte
 	FinalityModel       uint8
 	Status              uint8
 	WithdrawalDelay     uint64
 	RuntimeUpgradeDelay uint64
 }
 
-// phase1Domain returns the only profile Phase 1 accepts: active, no caps,
-// both delays at the withdrawal-delay floor.
+// phase1Domain returns the only domain profile RegisterDomain accepts: active,
+// with both delays at the withdrawal-delay floor.
 func phase1Domain(domainId uint32) domainParams {
 	return domainParams{
 		DomainId:            domainId,
@@ -104,18 +103,11 @@ func phase1Domain(domainId uint32) domainParams {
 		ChainBinding:        []byte{},
 		MinExecutors:        1,
 		ProposerPolicy:      definition.ProposerPolicySingle,
-		ValueCaps:           []byte{},
 		FinalityModel:       definition.FinalityModelDelay,
 		Status:              definition.DomainStatusActive,
 		WithdrawalDelay:     constants.WithdrawalDelayMin,
 		RuntimeUpgradeDelay: constants.WithdrawalDelayMin,
 	}
-}
-
-// valueCapsWithWindow builds a valueCaps blob: an 8-byte big-endian window
-// followed by a tag byte that distinguishes blobs with the same window.
-func valueCapsWithWindow(window uint64, tag byte) []byte {
-	return append(common.Uint64ToBytes(window), tag)
 }
 
 // assetIdFor builds the canonical asset id: 22 zero bytes then the ZTS.
@@ -148,7 +140,6 @@ func registerDomainStep(admin types.Address, p domainParams) *nom.AccountBlock {
 		p.ChainBinding,
 		p.MinExecutors,
 		p.ProposerPolicy,
-		p.ValueCaps,
 		p.FinalityModel,
 		p.Status,
 		p.WithdrawalDelay,
@@ -306,7 +297,7 @@ func TestSettlement_RegisterDomain_Phase1Profile(t *testing.T) {
 		record.StfSpecHash != types.ZeroHash || record.InputSource != definition.InputSourceL1Native ||
 		record.ExecProfile != definition.ExecProfileAttestation || record.ForeignProfile != definition.ForeignProfileNone ||
 		len(record.ProfileConfig) != 0 || len(record.ChainBinding) != 0 || record.MinExecutors != 1 ||
-		record.ProposerPolicy != definition.ProposerPolicySingle || len(record.ValueCaps) != 0 ||
+		record.ProposerPolicy != definition.ProposerPolicySingle ||
 		record.FinalityModel != definition.FinalityModelDelay || record.Status != definition.DomainStatusActive {
 		t.Fatalf("unexpected domain record: %+v", record)
 	}
@@ -334,7 +325,7 @@ func TestSettlement_RegisterDomain_RejectsReservedValues(t *testing.T) {
 	}{
 		{"domainId 0", func(p *domainParams) { p.DomainId = 0 }},
 		{"inputSource relayed", func(p *domainParams) { p.InputSource = 1 }},
-		{"inputSource retired", func(p *domainParams) { p.InputSource = 2 }},
+		{"inputSource 2", func(p *domainParams) { p.InputSource = 2 }},
 		{"proposerPolicy 1", func(p *domainParams) { p.ProposerPolicy = 1 }},
 		{"proposerPolicy 2", func(p *domainParams) { p.ProposerPolicy = 2 }},
 		{"domainClass 1", func(p *domainParams) { p.DomainClass = 1 }},
@@ -352,12 +343,6 @@ func TestSettlement_RegisterDomain_RejectsReservedValues(t *testing.T) {
 		{"status 2", func(p *domainParams) { p.Status = 2 }},
 		{"chainBinding set", func(p *domainParams) { p.ChainBinding = []byte{1} }},
 		{"profileConfig set", func(p *domainParams) { p.ProfileConfig = []byte{1} }},
-		{"valueCaps 1 byte", func(p *domainParams) { p.ValueCaps = []byte{1} }},
-		{"valueCaps 7 bytes", func(p *domainParams) { p.ValueCaps = make([]byte, 7) }},
-		{"window below withdrawalDelay", func(p *domainParams) {
-			p.WithdrawalDelay, p.RuntimeUpgradeDelay = d+5, d+5
-			p.ValueCaps = valueCapsWithWindow(d, 0)
-		}},
 		{"withdrawalDelay below min", func(p *domainParams) { p.WithdrawalDelay = d - 1 }},
 		{"withdrawalDelay above max", func(p *domainParams) {
 			p.WithdrawalDelay = constants.WithdrawalDelayMax + 1
@@ -399,24 +384,24 @@ func TestSettlement_RegisterDomain_RejectsSkippedIdChangedDelaysAndNoOp(t *testi
 	}
 }
 
-func TestSettlement_RegisterDomain_ValueCapsChangeIsTimeChallenged(t *testing.T) {
+func TestSettlement_RegisterDomain_StatusAppliesWhileSpecChangeIsPending(t *testing.T) {
 	z := newSettlementZenon(t)
-	constants.MinAdministratorDelay = 20
-	d := constants.WithdrawalDelayMin
+	savedMin := constants.WithdrawalDelayMin
+	constants.WithdrawalDelayMin = 10
+	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
 	scope := "RegisterDomain/1"
 
-	oldCaps := valueCapsWithWindow(d, 1)
-	newCaps := valueCapsWithWindow(d, 2)
+	oldHash := types.ZeroHash
+	newHash := hashFromByteForTest(2)
 	p := phase1Domain(1)
-	p.ValueCaps = oldCaps
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 
-	// 1. new caps with PAUSED: status applies at once, caps stay pending
-	p.ValueCaps, p.Status = newCaps, definition.DomainStatusPaused
+	// 1. new spec hash with PAUSED: status applies at once, the hash stays pending
+	p.StfSpecHash, p.Status = newHash, definition.DomainStatusPaused
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 	record := domainRecordOf(t, z, 1)
-	if record.Status != definition.DomainStatusPaused || !bytes.Equal(record.ValueCaps, oldCaps) {
-		t.Fatalf("expected PAUSED with old caps, got %+v", record)
+	if record.Status != definition.DomainStatusPaused || record.StfSpecHash != oldHash {
+		t.Fatalf("expected PAUSED with old spec hash, got %+v", record)
 	}
 	h := challengeHash(t, z, scope)
 	if h.IsZero() {
@@ -424,7 +409,7 @@ func TestSettlement_RegisterDomain_ValueCapsChangeIsTimeChallenged(t *testing.T)
 	}
 
 	// 2. status-only flip keeps the pending challenge
-	p.ValueCaps, p.Status = oldCaps, definition.DomainStatusActive
+	p.StfSpecHash, p.Status = oldHash, definition.DomainStatusActive
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusActive {
 		t.Fatalf("expected ACTIVE, got %+v", record)
@@ -434,19 +419,19 @@ func TestSettlement_RegisterDomain_ValueCapsChangeIsTimeChallenged(t *testing.T)
 	}
 
 	// 3. premature completion fails and rolls its status back
-	p.ValueCaps, p.Status = newCaps, definition.DomainStatusPaused
+	p.StfSpecHash, p.Status = newHash, definition.DomainStatusPaused
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrTimeChallengeNotDue)
 	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusActive {
 		t.Fatalf("expected ACTIVE after rolled-back call, got %+v", record)
 	}
 
-	// 4. completion applies the caps and its own status
-	advanceMomentums(t, z, constants.MinAdministratorDelay)
-	p.ValueCaps, p.Status = newCaps, definition.DomainStatusActive
+	// 4. completion applies the spec hash and its own status
+	advanceMomentums(t, z, p.RuntimeUpgradeDelay)
+	p.StfSpecHash, p.Status = newHash, definition.DomainStatusActive
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 	record = domainRecordOf(t, z, 1)
-	if record.Status != definition.DomainStatusActive || !bytes.Equal(record.ValueCaps, newCaps) {
-		t.Fatalf("expected ACTIVE with new caps, got %+v", record)
+	if record.Status != definition.DomainStatusActive || record.StfSpecHash != newHash {
+		t.Fatalf("expected ACTIVE with new spec hash, got %+v", record)
 	}
 }
 
@@ -524,46 +509,6 @@ func TestSettlement_SetDomainConfig_TimeChallenge(t *testing.T) {
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusPaused {
 		t.Fatalf("expected PAUSED, got %+v", record)
-	}
-}
-
-func TestSettlement_SetDomainConfig_RejectsDelayAboveValueCapWindow(t *testing.T) {
-	z := newSettlementZenon(t)
-	constants.MinSoftDelay = 30
-	constants.MinAdministratorDelay = 10
-	d := constants.WithdrawalDelayMin
-	window := d + 10
-
-	p1 := phase1Domain(1)
-	p1.ValueCaps = valueCapsWithWindow(window, 1)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p1), nil)
-	p2 := phase1Domain(2)
-	p2.ValueCaps = valueCapsWithWindow(window, 1)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
-
-	// a delay above the window is rejected; a delay equal to it is accepted
-	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window+1, window+1), constants.ErrForbiddenParam)
-	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window, window), nil)
-	advanceMomentums(t, z, constants.MinSoftDelay)
-	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 1, window, window), nil)
-	if got := domainConfigOf(t, z, 1); got.WithdrawalDelay != window {
-		t.Fatalf("expected delay %d, got %+v", window, got)
-	}
-
-	// domain 2: a pending delay is invalidated by a later window shrink
-	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 2, d+5, d+5), nil)
-	p2.ValueCaps = valueCapsWithWindow(d, 2)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
-	advanceMomentums(t, z, constants.MinAdministratorDelay)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p2), nil)
-	if record := domainRecordOf(t, z, 2); !bytes.Equal(record.ValueCaps, p2.ValueCaps) {
-		t.Fatalf("expected shrunk window to be stored, got %+v", record)
-	}
-
-	advanceMomentums(t, z, constants.MinSoftDelay)
-	settlementCall(t, z, setDomainConfigStep(g.User5.Address, 2, d+5, d+5), constants.ErrForbiddenParam)
-	if got := domainConfigOf(t, z, 2); got.WithdrawalDelay != d {
-		t.Fatalf("expected stored delays unchanged, got %+v", got)
 	}
 }
 
@@ -1069,64 +1014,26 @@ func TestSettlement_Update_WorkerSkipsBeforeSpork(t *testing.T) {
 	}
 }
 
-func TestSettlement_RegisterDomain_CapsAndSpecChangeUsesLongerDelay(t *testing.T) {
+func TestSettlement_RegisterDomain_StatusCallWithOtherSpecHashRestartsChallenge(t *testing.T) {
 	z := newSettlementZenon(t)
-	savedMin := constants.WithdrawalDelayMin
-	constants.WithdrawalDelayMin = 10
-	constants.MinAdministratorDelay = 10
-	t.Cleanup(func() { constants.WithdrawalDelayMin = savedMin })
-
-	oldCaps := valueCapsWithWindow(10, 1)
-	newCaps := valueCapsWithWindow(10, 2)
-	p := phase1Domain(1)
-	p.RuntimeUpgradeDelay = 40
-	p.ValueCaps = oldCaps
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
-
-	bumped := hashFromByteForTest(9)
-	p.ValueCaps, p.StfSpecHash = newCaps, bumped
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
-
-	// past the caps delay but before the runtime upgrade delay
-	advanceMomentums(t, z, 20)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p), constants.ErrTimeChallengeNotDue)
-	record := domainRecordOf(t, z, 1)
-	if !bytes.Equal(record.ValueCaps, oldCaps) || record.StfSpecHash != types.ZeroHash {
-		t.Fatalf("expected old caps and hash while pending, got %+v", record)
-	}
-
-	advanceMomentums(t, z, 40)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
-	record = domainRecordOf(t, z, 1)
-	if !bytes.Equal(record.ValueCaps, newCaps) || record.StfSpecHash != bumped {
-		t.Fatalf("expected new caps and hash, got %+v", record)
-	}
-}
-
-func TestSettlement_RegisterDomain_StatusCallWithOtherCapsRestartsChallenge(t *testing.T) {
-	z := newSettlementZenon(t)
-	constants.MinAdministratorDelay = 20
 	scope := "RegisterDomain/1"
-	d := constants.WithdrawalDelayMin
 
-	oldCaps := valueCapsWithWindow(d, 1)
 	p := phase1Domain(1)
-	p.ValueCaps = oldCaps
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 
-	p.ValueCaps = valueCapsWithWindow(d, 2)
+	p.StfSpecHash = hashFromByteForTest(1)
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
 	h := challengeHash(t, z, scope)
 	if h.IsZero() {
 		t.Fatal("expected a pending challenge")
 	}
 
-	// a status change carrying caps other than the stored ones is a different
-	// change: it applies its status and replaces the pending challenge
-	p.ValueCaps, p.Status = valueCapsWithWindow(d, 3), definition.DomainStatusPaused
+	// a status change carrying a spec hash other than the stored one is a
+	// different change: it applies its status and replaces the pending challenge
+	p.StfSpecHash, p.Status = hashFromByteForTest(3), definition.DomainStatusPaused
 	settlementCall(t, z, registerDomainStep(g.User5.Address, p), nil)
-	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusPaused || !bytes.Equal(record.ValueCaps, oldCaps) {
-		t.Fatalf("expected PAUSED with old caps, got %+v", record)
+	if record := domainRecordOf(t, z, 1); record.Status != definition.DomainStatusPaused || record.StfSpecHash != types.ZeroHash {
+		t.Fatalf("expected PAUSED with the stored spec hash, got %+v", record)
 	}
 	if got := challengeHash(t, z, scope); got.IsZero() || got == h {
 		t.Fatalf("expected a restarted challenge, old %v new %v", h, got)
@@ -2087,7 +1994,7 @@ func outboxMessage(source types.Hash, input uint64, outbox uint32, to types.Addr
 	return binary.BigEndian.AppendUint32(out, 0)
 }
 
-// outboxTree builds the three-leaf SPEC 27.3 tree: the third leaf is
+// outboxTree builds the three-leaf batch-root Merkle tree: the third leaf is
 // promoted past the first level and carries a one-step proof.
 func outboxTree(leaves [][]byte) (root types.Hash, proofs [][]byte) {
 	h := func(prefix byte, parts ...[]byte) []byte {
