@@ -132,12 +132,6 @@ func (p *SettlementReleaseWithdrawalsMethod) ReceiveBlock(context vm_context.Acc
 	return releaseWithdrawals(context.Storage(), frontier.Height, *domainId)
 }
 
-// valueCapWindow returns the rolling-window length carried in the first 8
-// bytes (big-endian) of a non-empty valueCaps.
-func valueCapWindow(valueCaps []byte) uint64 {
-	return binary.BigEndian.Uint64(valueCaps[:8])
-}
-
 // getRegisteredDomain returns the domain's record, or ErrForbiddenParam
 // when the domain is not registered.
 func getRegisteredDomain(context vm_context.AccountVmContext, domainId uint32) (*definition.DomainRecord, error) {
@@ -164,7 +158,6 @@ type SettlementRegisterDomainParam struct {
 	ChainBinding        []byte
 	MinExecutors        uint8
 	ProposerPolicy      uint8
-	ValueCaps           []byte
 	FinalityModel       uint8
 	Status              uint8
 	WithdrawalDelay     uint64
@@ -213,11 +206,6 @@ func (p *SettlementRegisterDomainMethod) ValidateSendBlock(block *nom.AccountBlo
 	if !constants.IsRuntimeUpgradeDelayValid(param.RuntimeUpgradeDelay, param.WithdrawalDelay) {
 		return constants.ErrForbiddenParam
 	}
-	if len(param.ValueCaps) != 0 {
-		if len(param.ValueCaps) < 8 || !constants.IsValueCapWindowValid(valueCapWindow(param.ValueCaps), param.WithdrawalDelay) {
-			return constants.ErrForbiddenParam
-		}
-	}
 
 	block.Data, err = definition.ABISettlement.PackMethod(p.MethodName,
 		param.DomainId,
@@ -231,7 +219,6 @@ func (p *SettlementRegisterDomainMethod) ValidateSendBlock(block *nom.AccountBlo
 		param.ChainBinding,
 		param.MinExecutors,
 		param.ProposerPolicy,
-		param.ValueCaps,
 		param.FinalityModel,
 		param.Status,
 		param.WithdrawalDelay,
@@ -275,7 +262,6 @@ func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.Account
 			ChainBinding:    param.ChainBinding,
 			MinExecutors:    param.MinExecutors,
 			ProposerPolicy:  param.ProposerPolicy,
-			ValueCaps:       param.ValueCaps,
 			FinalityModel:   param.FinalityModel,
 			Status:          param.Status,
 		}
@@ -314,10 +300,10 @@ func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.Account
 		return nil, constants.ErrForbiddenParam
 	}
 
-	custodyChanged := !bytes.Equal(param.ValueCaps, record.ValueCaps) || param.MinExecutors != record.MinExecutors
+	executorsChanged := param.MinExecutors != record.MinExecutors
 	specChanged := param.StfSpecHash != record.StfSpecHash
 	statusChanged := param.Status != record.Status
-	if !custodyChanged && !specChanged && !statusChanged {
+	if !executorsChanged && !specChanged && !statusChanged {
 		return nil, constants.ErrForbiddenParam
 	}
 
@@ -325,9 +311,9 @@ func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.Account
 	// returns without error.
 	record.Status = param.Status
 
-	if custodyChanged || specChanged {
+	if executorsChanged || specChanged {
 		var delay uint64
-		if custodyChanged {
+		if executorsChanged {
 			delay = constants.MinAdministratorDelay
 		}
 		if specChanged && config.RuntimeUpgradeDelay > delay {
@@ -339,7 +325,6 @@ func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.Account
 			[]byte{param.MinExecutors},
 			common.Uint64ToBytes(param.WithdrawalDelay),
 			common.Uint64ToBytes(param.RuntimeUpgradeDelay),
-			param.ValueCaps,
 		)
 		timeChallengeInfo, err := TimeChallenge(context, fmt.Sprintf("%s/%d", p.MethodName, param.DomainId), paramsHash, delay)
 		if err != nil {
@@ -350,7 +335,6 @@ func (p *SettlementRegisterDomainMethod) ReceiveBlock(context vm_context.Account
 			common.DealWithErr(record.Save(context.Storage()))
 			return nil, nil
 		}
-		record.ValueCaps = param.ValueCaps
 		record.MinExecutors = param.MinExecutors
 		record.StfSpecHash = param.StfSpecHash
 	}
@@ -410,12 +394,8 @@ func (p *SettlementSetDomainConfigMethod) ReceiveBlock(context vm_context.Accoun
 		return nil, err
 	}
 
-	record, err := getRegisteredDomain(context, param.DomainId)
-	if err != nil {
+	if _, err := getRegisteredDomain(context, param.DomainId); err != nil {
 		return nil, err
-	}
-	if len(record.ValueCaps) != 0 && !constants.IsValueCapWindowValid(valueCapWindow(record.ValueCaps), param.WithdrawalDelay) {
-		return nil, constants.ErrForbiddenParam
 	}
 
 	paramsHash := crypto.Hash(
@@ -677,8 +657,8 @@ func (p *SettlementPauseMethod) ReceiveBlock(context vm_context.AccountVmContext
 }
 
 // ============================================================================
-// InitiateEscapeHatch (stub: signature + durable record + time-lock only;
-// forced-withdrawal mechanics are a tracked follow-up)
+// InitiateEscapeHatch (stub: signature, durable record and time-lock only;
+// forced withdrawals are not implemented)
 // ============================================================================
 
 type SettlementInitiateEscapeHatchMethod struct{ MethodName string }
@@ -1231,8 +1211,8 @@ type assetFlowEntry struct {
 	WithdrawalDebit *big.Int
 }
 
-// decodeAssetFlowSummary decodes the SPEC §27.6 encoding: u32 BE count N,
-// then N entries of asset_id(32) ‖ deposit_credit(u256 BE) ‖
+// decodeAssetFlowSummary decodes the asset-flow summary encoding: u32 BE
+// count N, then N entries of asset_id(32) ‖ deposit_credit(u256 BE) ‖
 // withdrawal_debit(u256 BE). The caller passes exactly the summary bytes:
 // trailing bytes are an error, so a caller reading the summary inline
 // from a larger encoding reads N, bounds it, and slices 4 + N*96 bytes

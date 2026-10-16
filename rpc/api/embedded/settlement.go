@@ -59,7 +59,6 @@ type SettlementDomainInfo struct {
 	ChainBinding        []byte                 `json:"chainBinding"`
 	MinExecutors        uint8                  `json:"minExecutors"`
 	ProposerPolicy      uint8                  `json:"proposerPolicy"`
-	ValueCaps           []byte                 `json:"valueCaps"`
 	FinalityModel       uint8                  `json:"finalityModel"`
 	Status              uint8                  `json:"status"`
 	WithdrawalDelay     uint64                 `json:"withdrawalDelay"`
@@ -541,7 +540,6 @@ func toSettlementDomainInfo(storage db.DB, record *definition.DomainRecord) (*Se
 		ChainBinding:        record.ChainBinding,
 		MinExecutors:        record.MinExecutors,
 		ProposerPolicy:      record.ProposerPolicy,
-		ValueCaps:           record.ValueCaps,
 		FinalityModel:       record.FinalityModel,
 		Status:              record.Status,
 		WithdrawalDelay:     config.WithdrawalDelay,

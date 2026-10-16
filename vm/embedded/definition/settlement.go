@@ -40,7 +40,6 @@ const (
 			{"name":"chainBinding","type":"bytes"},
 			{"name":"minExecutors","type":"uint8"},
 			{"name":"proposerPolicy","type":"uint8"},
-			{"name":"valueCaps","type":"bytes"},
 			{"name":"finalityModel","type":"uint8"},
 			{"name":"status","type":"uint8"},
 			{"name":"withdrawalDelay","type":"uint64"},
@@ -119,7 +118,6 @@ const (
 			{"name":"chainBinding","type":"bytes"},
 			{"name":"minExecutors","type":"uint8"},
 			{"name":"proposerPolicy","type":"uint8"},
-			{"name":"valueCaps","type":"bytes"},
 			{"name":"finalityModel","type":"uint8"},
 			{"name":"status","type":"uint8"}
 		]},
@@ -296,10 +294,6 @@ const (
 			{"name":"state","type":"uint8"}
 		]},
 
-		{"type":"variable","name":"fraudRefereeRegistryEntry","inputs":[
-			{"name":"reserved","type":"bytes"}
-		]},
-
 		{"type":"variable","name":"validityKeyRegistryEntry","inputs":[
 			{"name":"reserved","type":"bytes"}
 		]}
@@ -309,9 +303,8 @@ const (
 	SettlementReleaseWithdrawalsMethodName = "ReleaseWithdrawals"
 	SettlementCollectRewardMethodName      = "CollectReward"
 
-	SettlementRegisterExecutorMethodName   = "RegisterExecutor"
-	SettlementSetPeripheryConfigMethodName = "SetPeripheryConfig"
-	// declared, not yet wired
+	SettlementRegisterExecutorMethodName    = "RegisterExecutor"
+	SettlementSetPeripheryConfigMethodName  = "SetPeripheryConfig"
 	SettlementInitiateEscapeHatchMethodName = "InitiateEscapeHatch"
 
 	SettlementRegisterDomainMethodName     = "RegisterDomain"
@@ -333,38 +326,37 @@ const (
 	SettlementTransferContractOwnershipMethodName = "TransferContractOwnership"
 	SettlementBuyStorageMethodName                = "BuyStorage"
 
-	DomainRecordVariableName              = "domainRecord"
-	BatchEntryVariableName                = "batchEntry"
-	InputSequenceCursorVariableName       = "inputSequenceCursor"
-	receivedInputCounterVariableName      = "receivedInputCounter"
-	DomainInputCounterVariableName        = "domainInputCounter"
-	DomainInputOrdinalVariableName        = "domainInputOrdinal"
-	assignedIndexRecordVariableName       = "assignedIndexRecord"
-	cumulativeDepositTotalVariableName    = "cumulativeDepositTotal"
-	conservationCountersVariableName      = "conservationCounters"
-	releaseQueueEntryVariableName         = "releaseQueueEntry"
-	ReleaseQueueMetaVariableName          = "releaseQueueMeta"
-	releaseRateLimitVariableName          = "releaseRateLimit"
-	batchWithdrawalTotalVariableName      = "batchWithdrawalTotal"
-	deployRecordVariableName              = "deployRecord"
-	deployChunkVariableName               = "deployChunk"
-	deployStartQueueEntryVariableName     = "deployStartQueueEntry"
-	deployStartQueueMetaVariableName      = "deployStartQueueMeta"
-	ExecutorSetMemberVariableName         = "executorSetMember"
-	peripheryConfigVariableName           = "peripheryConfig"
-	pendingFeeVariableName                = "pendingFee"
-	feeEpochVariableName                  = "feeEpoch"
-	feeCountersVariableName               = "feeCounters"
-	domainConfigVariableName              = "domainConfig"
-	AssetConfigVariableName               = "assetConfig"
-	approvedDAModeSetVariableName         = "approvedDAModeSet"
-	domainCounterVariableName             = "domainCounter"
-	PauseStateVariableName                = "pauseState"
-	escapeHatchRecordVariableName         = "escapeHatchRecord"
-	assetRegistryEntryVariableName        = "assetRegistryEntry"
-	messageStateVariableName              = "messageState"
-	fraudRefereeRegistryEntryVariableName = "fraudRefereeRegistryEntry"
-	validityKeyRegistryEntryVariableName  = "validityKeyRegistryEntry"
+	DomainRecordVariableName             = "domainRecord"
+	BatchEntryVariableName               = "batchEntry"
+	InputSequenceCursorVariableName      = "inputSequenceCursor"
+	receivedInputCounterVariableName     = "receivedInputCounter"
+	DomainInputCounterVariableName       = "domainInputCounter"
+	DomainInputOrdinalVariableName       = "domainInputOrdinal"
+	assignedIndexRecordVariableName      = "assignedIndexRecord"
+	cumulativeDepositTotalVariableName   = "cumulativeDepositTotal"
+	conservationCountersVariableName     = "conservationCounters"
+	releaseQueueEntryVariableName        = "releaseQueueEntry"
+	ReleaseQueueMetaVariableName         = "releaseQueueMeta"
+	releaseRateLimitVariableName         = "releaseRateLimit"
+	batchWithdrawalTotalVariableName     = "batchWithdrawalTotal"
+	deployRecordVariableName             = "deployRecord"
+	deployChunkVariableName              = "deployChunk"
+	deployStartQueueEntryVariableName    = "deployStartQueueEntry"
+	deployStartQueueMetaVariableName     = "deployStartQueueMeta"
+	ExecutorSetMemberVariableName        = "executorSetMember"
+	peripheryConfigVariableName          = "peripheryConfig"
+	pendingFeeVariableName               = "pendingFee"
+	feeEpochVariableName                 = "feeEpoch"
+	feeCountersVariableName              = "feeCounters"
+	domainConfigVariableName             = "domainConfig"
+	AssetConfigVariableName              = "assetConfig"
+	approvedDAModeSetVariableName        = "approvedDAModeSet"
+	domainCounterVariableName            = "domainCounter"
+	PauseStateVariableName               = "pauseState"
+	escapeHatchRecordVariableName        = "escapeHatchRecord"
+	assetRegistryEntryVariableName       = "assetRegistryEntry"
+	messageStateVariableName             = "messageState"
+	validityKeyRegistryEntryVariableName = "validityKeyRegistryEntry"
 )
 
 // DomainRecord.domainClass
@@ -383,14 +375,12 @@ const (
 const (
 	InputSourceL1Native uint8 = iota
 	InputSourceL1Relayed
-	// value 2 is retired and must not be reassigned
 )
 
 // DomainRecord.execProfile
 const (
-	ExecProfileAttestation uint8 = iota
-	ExecProfileOptimistic
-	ExecProfileZkValidity
+	ExecProfileAttestation uint8 = 0
+	ExecProfileZkValidity  uint8 = 2
 )
 
 // DomainRecord.foreignProfile
@@ -404,16 +394,12 @@ const (
 // DomainRecord.proposerPolicy
 const (
 	ProposerPolicySingle uint8 = iota
-	ProposerPolicyRandomBackup
-	// reserved (permissionless / Phase 3)
-	ProposerPolicyStakeWeighted
 )
 
 // DomainRecord.finalityModel
 const (
-	FinalityModelDelay uint8 = iota
-	FinalityModelChallengeWindow
-	FinalityModelProofVerified
+	FinalityModelDelay         uint8 = 0
+	FinalityModelProofVerified uint8 = 2
 )
 
 // DomainRecord.status
@@ -427,26 +413,20 @@ const (
 	DAModeBestEffort uint8 = 0
 )
 
-// BatchEntry.state. The stored value is the acceptance state: SubmitBatch
-// writes BatchStateSubmitted and no code writes BatchStateFinalized.
-// BatchEntry.IsFinalized(height) is the authority on finality.
+// BatchEntry.state. The stored value is the acceptance state, which SubmitBatch
+// writes. BatchEntry.IsFinalized(height) is the authority on finality.
 const (
 	BatchStateSubmitted uint8 = iota
-	BatchStateFinalized
 )
 
 // ExecutorSetMember.status
 const (
 	ExecutorStatusActive uint8 = iota
-	// reserved
-	ExecutorStatusLapsed
-	// reserved
-	ExecutorStatusCooldown
 )
 
 // Pause scopes
 const (
-	PauseScopeSubmit uint8 = iota // halts SubmitBatch (Ticket 15)
+	PauseScopeSubmit uint8 = iota // halts SubmitBatch
 	PauseScopeRelay               // halts RelayMessage registration, ReleaseWithdrawals release, fee settlement and CollectReward
 )
 
@@ -472,7 +452,6 @@ var (
 	peripheryConfigKey           = []byte{0x0D} // PeripheryConfig, singleton
 	assetRegistryPrefix          = []byte{0x0E} // reserved, key: domainId ‖ assetId (32B)
 	messageStatePrefix           = []byte{0x0F} // reserved, key: outboxId (32B)
-	fraudRefereeRegistryPrefix   = []byte{0x10} // reserved, key: domainId
 	validityKeyRegistryPrefix    = []byte{0x11} // reserved, key: verifyingKeyId (32B)
 	globalPauseStateKey          = []byte{0x12} // PauseState, singleton
 	domainPauseStatePrefix       = []byte{0x13} // PauseState, key: domainId (u32 BE)
@@ -534,7 +513,6 @@ type DomainRecord struct {
 	ChainBinding   []byte
 	MinExecutors   uint8
 	ProposerPolicy uint8
-	ValueCaps      []byte
 	FinalityModel  uint8
 	Status         uint8
 }
@@ -552,7 +530,6 @@ func (d *DomainRecord) Save(context db.DB) error {
 		d.ChainBinding,
 		d.MinExecutors,
 		d.ProposerPolicy,
-		d.ValueCaps,
 		d.FinalityModel,
 		d.Status,
 	)
@@ -629,8 +606,7 @@ type BatchEntry struct {
 	FinalizeAtHeight  uint64
 	AssetFlowSummary  []byte
 	ProofData         []byte
-	// State is the acceptance state. No code writes BatchStateFinalized;
-	// IsFinalized(height) is authoritative.
+	// State is the acceptance state; IsFinalized(height) is authoritative.
 	State uint8
 }
 
@@ -2196,11 +2172,12 @@ func GetEscapeHatchRecord(context db.DB, domainId uint32) (*EscapeHatchRecord, e
 }
 
 // ============================================================================
-// Reserved storage entities (schema present, unused in Phase 1)
+// Reserved storage entities: declared schemas that nothing reads or writes yet
 // ============================================================================
 
 // AssetRegistryEntry reserves the per-(domain, asset) custody, foreign-binding
-// and supply-counter schema. No callers exist in Phase 1.
+// and supply-counter schema. Nothing reads or writes it while ESCROW is the
+// only custody mode.
 type AssetRegistryEntry struct {
 	DomainId                 uint32
 	AssetId                  types.Hash
@@ -2251,8 +2228,8 @@ func GetAssetRegistryEntry(context db.DB, domainId uint32, assetId types.Hash) (
 	}
 }
 
-// MessageStateEntry reserves the per-outboxId timeout/ack-policy schema. No
-// callers exist in Phase 1.
+// MessageStateEntry reserves the per-outboxId timeout/ack-policy schema.
+// Nothing reads or writes it yet.
 type MessageStateEntry struct {
 	OutboxId  types.Hash
 	Timeout   uint64
@@ -2291,44 +2268,9 @@ func GetMessageStateEntry(context db.DB, outboxId types.Hash) (*MessageStateEntr
 	}
 }
 
-// FraudRefereeRegistryEntry reserves the per-domain fraud-proof referee
-// registry schema (Phase 2, OPTIMISTIC). No callers exist in Phase 1.
-type FraudRefereeRegistryEntry struct {
-	DomainId uint32
-	Reserved []byte
-}
-
-func getFraudRefereeRegistryKey(domainId uint32) []byte {
-	return common.JoinBytes(fraudRefereeRegistryPrefix, uint32ToBytesBE(domainId))
-}
-func (e *FraudRefereeRegistryEntry) Save(context db.DB) error {
-	data, err := ABISettlement.PackVariable(
-		fraudRefereeRegistryEntryVariableName,
-		e.Reserved,
-	)
-	if err != nil {
-		return err
-	}
-	return context.Put(getFraudRefereeRegistryKey(e.DomainId), data)
-}
-func GetFraudRefereeRegistryEntry(context db.DB, domainId uint32) (*FraudRefereeRegistryEntry, error) {
-	key := getFraudRefereeRegistryKey(domainId)
-	if data, err := context.Get(key); err != nil {
-		return nil, err
-	} else if len(data) == 0 {
-		return nil, constants.ErrDataNonExistent
-	} else {
-		entry := new(FraudRefereeRegistryEntry)
-		if err := ABISettlement.UnpackVariable(entry, fraudRefereeRegistryEntryVariableName, data); err != nil {
-			return nil, err
-		}
-		entry.DomainId = domainId
-		return entry, nil
-	}
-}
-
 // ValidityKeyRegistryEntry reserves the per-verifyingKeyId validity-proof
-// verifier registry schema (Phase 3, ZK_VALIDITY). No callers exist in Phase 1.
+// verifier registry schema for the ZK_VALIDITY profile. Nothing reads or
+// writes it yet.
 type ValidityKeyRegistryEntry struct {
 	VerifyingKeyId types.Hash
 	Reserved       []byte
