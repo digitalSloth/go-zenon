@@ -56,28 +56,6 @@ func TestIsRuntimeUpgradeDelayValid(t *testing.T) {
 	}
 }
 
-func TestIsValueCapWindowValid(t *testing.T) {
-	if !IsValueCapWindowValid(100, 100) {
-		t.Fatal("expected window equal to the active withdrawal delay to be valid")
-	}
-	if !IsValueCapWindowValid(101, 100) {
-		t.Fatal("expected window above the active withdrawal delay to be valid")
-	}
-	if IsValueCapWindowValid(99, 100) {
-		t.Fatal("expected window < activeWithdrawalDelay to be rejected")
-	}
-
-	// The floor tracks the delay in force: the same window that is valid against
-	// a short delay is rejected against a longer one.
-	window := WithdrawalDelayMin
-	if !IsValueCapWindowValid(window, WithdrawalDelayMin) {
-		t.Fatal("expected window to be valid against the minimum delay")
-	}
-	if IsValueCapWindowValid(window, WithdrawalDelayMin*2) {
-		t.Fatal("expected the same window to be rejected against a longer active delay")
-	}
-}
-
 func TestIsInputGasInBounds(t *testing.T) {
 	if !IsInputGasInBounds(0) {
 		t.Fatal("expected a zero budget to be in bounds")

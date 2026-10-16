@@ -6,25 +6,13 @@ import "math/big"
 const (
 	MaxOnChainCommitmentSize       = 1024 * 15 // 15 KiB
 	MaxCallPayload                 = 1024 * 8  // 8 KiB
-	MaxReturnData                  = 1024 * 4  // 4 KiB
 	MaxExecutionResult             = 1024 * 32 // 32 KiB
 	MaxBatchInputs                 = 64
-	MaxDAChunkSize                 = 1024 * 16  // 16 KiB (off-chain DA only)
 	MaxDeployChunkData             = 1024 * 15  // 15 KiB
 	MaxCodeSize                    = 1024 * 256 // 256 KiB (pre-instrumentation)
 	MaxChunkCount                  = 18
 	DeploymentExpiryWindow         = 2880 // momentum heights
 	MaxContractMetadataSize        = 256
-	MaxMemory                      = 64 * 65536 // 4 MiB (64 WASM pages)
-	MaxStackDepth                  = 512
-	MaxInstrumentedCodeSize        = 1024 * 1024 // 1 MiB post-instrumentation ceiling
-	MaxStateKeySize                = 32
-	MaxStateValueSize              = 1024 * 16 // 16 KiB
-	MaxEventsPerExecution          = 64
-	MaxEventDataSize               = 1024 // 1 KiB
-	MaxTopicsPerEvent              = 4
-	MaxOutboxPerExecution          = 32
-	MaxOutboxPayloadSize           = 1024 * 8 // 8 KiB
 	MaxAssetsPerBatch              = 16
 	MaxWithdrawalsPerUpdate        = 16
 	ReleaseIntervalMomentums       = 1  // minimum momentums between a domain's accepted ReleaseWithdrawals calls
@@ -47,11 +35,11 @@ const (
 	SettlementDAModeVersion          uint16 = 1
 )
 
-// Hard-bound holders for pre-mainnet parameters. Concrete ceilings are
-// placeholders finalized by a later parameterization ticket; floors and the
-// existence/enforcement of the bounds themselves are normative.
+// Hard bounds on Settlement's configurable parameters and input budgets.
+// The ceilings are placeholders to finalize before mainnet; the floors, and
+// the enforcement of every bound, are fixed.
 var (
-	// Withdrawal-delay / challenge-window bounds (momentum heights).
+	// Withdrawal-delay bounds (momentum heights).
 	// Floor per MomentumsPerEpoch; ceiling is a pre-mainnet placeholder (~14 days).
 	WithdrawalDelayMin = uint64(MomentumsPerEpoch)
 	// pre-mainnet; finalize before mainnet
@@ -74,7 +62,8 @@ var (
 	// pre-mainnet; finalize before mainnet
 	MaxInputGas = uint64(1_000_000_000)
 
-	// Reserved (MINTED only) — symmetric to MaxBatchWithdrawal, unused in Phase 1.
+	// Reserved for MINTED custody, symmetric to MaxBatchWithdrawal. Nothing reads
+	// it while ESCROW is the only custody mode.
 	MaxBatchMintFloor = big.NewInt(1)
 	// pre-mainnet; finalize before mainnet
 	MaxBatchMintCeiling = new(big.Int).Set(MaxBatchWithdrawalCeiling)
@@ -88,8 +77,8 @@ var (
 	ZnnPerByteOfStateCeiling = big.NewInt(Decimals)
 )
 
-// IsWithdrawalDelayInBounds reports whether a withdrawal-delay/challenge-window
-// duration (momentum heights) is within the enforced hard bounds.
+// IsWithdrawalDelayInBounds reports whether a withdrawal delay (momentum
+// heights) is within the enforced hard bounds.
 func IsWithdrawalDelayInBounds(heights uint64) bool {
 	return heights >= WithdrawalDelayMin && heights <= WithdrawalDelayMax
 }
@@ -126,20 +115,6 @@ func IsRuntimeUpgradeDelayValid(upgradeDelay, activeWithdrawalDelay uint64) bool
 // send validation and never becomes an input.
 func IsInputGasInBounds(plasmaLimit uint64) bool {
 	return plasmaLimit <= MaxInputGas
-}
-
-// IsValueCapWindowValid reports whether a valueCaps rolling-window duration
-// (momentum heights) satisfies the mandatory floor relative to the withdrawal
-// delay in force.
-//
-// The floor is the active withdrawal delay rather than a fixed constant, so a
-// long withdrawal delay cannot be paired with a short window to spread
-// withdrawals across micro-windows and bypass the cap. Symmetric to
-// IsRuntimeUpgradeDelayValid, and evaluated against the withdrawal delay in
-// force after the configuring call: when both values are set in the same call,
-// against the delay being set, not the one it replaces.
-func IsValueCapWindowValid(window, activeWithdrawalDelay uint64) bool {
-	return window >= activeWithdrawalDelay
 }
 
 // IsZnnPerByteOfBytecodeInBounds reports whether a bytecode fee price is

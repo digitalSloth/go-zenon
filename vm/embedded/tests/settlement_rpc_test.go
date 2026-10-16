@@ -114,7 +114,6 @@ func TestSettlementRpc_Domains(t *testing.T) {
 			"chainBinding": "",
 			"minExecutors": 1,
 			"proposerPolicy": %d,
-			"valueCaps": "",
 			"finalityModel": %d,
 			"status": %d,
 			"withdrawalDelay": %d,
@@ -426,9 +425,9 @@ func TestSettlementRpc_TimeChallenges(t *testing.T) {
 
 	// 1. RegisterExecutor and RegisterDomain challenges
 	settlementCall(t, z, registerExecutorStep(g.User5.Address, g.Pillar1Name, g.User1.Address), nil)
-	caps := phase1Domain(1)
-	caps.ValueCaps = valueCapsWithWindow(constants.WithdrawalDelayMin, 1)
-	settlementCall(t, z, registerDomainStep(g.User5.Address, caps), nil)
+	spec := phase1Domain(1)
+	spec.StfSpecHash = hashFromByteForTest(1)
+	settlementCall(t, z, registerDomainStep(g.User5.Address, spec), nil)
 
 	// 2. SetAssetConfig challenge, started last so the apply height
 	// stays ahead of the frontier

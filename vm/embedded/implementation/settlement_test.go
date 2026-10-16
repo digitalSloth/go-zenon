@@ -491,7 +491,7 @@ func TestActiveExecutorPillar(t *testing.T) {
 func TestActiveExecutorPillar_RejectsNonActiveStatus(t *testing.T) {
 	storage := feeTestStorage()
 	executor := feeTestAddress(0xE1)
-	for _, status := range []uint8{definition.ExecutorStatusLapsed, definition.ExecutorStatusCooldown} {
+	for _, status := range []uint8{1, 2} {
 		common.FailIfErr(t, (&definition.ExecutorSetMember{
 			PillarName: "pillar-a", ExecutorAddress: executor, Status: status,
 		}).Save(storage))
@@ -1526,7 +1526,7 @@ func TestAcceptBatch_ReplacedExecutorChainsFromLastRoot(t *testing.T) {
 	common.FailIfErr(t, submitBatch(t, storage, submitHeight0, batchSpec{domain: batchDomain, first: 0, last: 0, post: rootOf(0x51)}))
 
 	newExecutor := feeTestAddress(0xE3)
-	common.FailIfErr(t, (&definition.ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: batchExecutor, Status: definition.ExecutorStatusLapsed}).Save(storage))
+	common.FailIfErr(t, (&definition.ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: feeTestAddress(0xE4), Status: definition.ExecutorStatusActive}).Save(storage))
 	common.FailIfErr(t, (&definition.ExecutorSetMember{PillarName: "pillar-b", ExecutorAddress: newExecutor, Status: definition.ExecutorStatusActive}).Save(storage))
 
 	next := batchSpec{domain: batchDomain, batchId: 1, first: 1, last: 1, pre: rootOf(0x51), executor: newExecutor}
@@ -1803,7 +1803,7 @@ func refundMsg(input uint64, outbox uint32, to types.Address, amount int64) wmsg
 	return wmsg{input: input, outbox: outbox, recipient: to, amount: big.NewInt(amount)}
 }
 
-// testTree builds the SPEC 27.3 tree level by level: leaf
+// testTree builds the batch-root Merkle tree level by level: leaf
 // SHA3-256(0x00 || element), node SHA3-256(0x01 || left || right), an
 // odd trailing node promoted unchanged. It shares no code with
 // outboxProofRoot.
@@ -1886,7 +1886,7 @@ var conformanceInputRootElements = []string{
 
 const conformanceInputRoot = "47f19e1e068fa6f6ba7f62688536a8956f4d8d865a4e161e5e024e0f5ec3ad09"
 
-// conformanceInputRootProofs holds the SPEC 27.3 proof of each
+// conformanceInputRootProofs holds the batch-root Merkle proof of each
 // conformanceInputRootElements entry against conformanceInputRoot.
 var conformanceInputRootProofs = []string{
 	"0000000301bad27f23307aa3d0ab3134bb6192ba42e5e00ecb2a63f6b121437085f0d729db019e87e462b8684c764b19c42fa659f68451a0eb13788a817d7d1b3497d7e5f56c0191ab666fb84cc441e3c26510e4f7e3566f7c97c0b0d29c291c57fa20829a856c",
