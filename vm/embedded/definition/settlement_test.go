@@ -51,7 +51,6 @@ func TestDomainRecord_RoundTrip_FullFields(t *testing.T) {
 		ChainBinding:    []byte("chain-binding-blob"),
 		MinExecutors:    2,
 		ProposerPolicy:  ProposerPolicySingle,
-		ValueCaps:       []byte("value-caps-blob"),
 		FinalityModel:   FinalityModelDelay,
 		Status:          DomainStatusActive,
 	}
@@ -79,9 +78,6 @@ func TestDomainRecord_RoundTrip_FullFields(t *testing.T) {
 	if string(got.ChainBinding) != string(record.ChainBinding) {
 		t.Fatalf("chainBinding mismatch: got %q want %q", got.ChainBinding, record.ChainBinding)
 	}
-	if string(got.ValueCaps) != string(record.ValueCaps) {
-		t.Fatalf("valueCaps mismatch: got %q want %q", got.ValueCaps, record.ValueCaps)
-	}
 }
 
 func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
@@ -99,7 +95,6 @@ func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
 		ChainBinding:    []byte{},
 		MinExecutors:    1,
 		ProposerPolicy:  ProposerPolicySingle,
-		ValueCaps:       []byte{},
 		FinalityModel:   FinalityModelDelay,
 		Status:          DomainStatusActive,
 	}
@@ -111,7 +106,7 @@ func TestDomainRecord_RoundTrip_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.ProfileConfig) != 0 || len(got.ChainBinding) != 0 || len(got.ValueCaps) != 0 {
+	if len(got.ProfileConfig) != 0 || len(got.ChainBinding) != 0 {
 		t.Fatalf("expected empty reserved blobs, got %+v", got)
 	}
 }
@@ -374,7 +369,6 @@ func TestKeyPrefixes_NoCollisions(t *testing.T) {
 		"feeCounters":            feeCountersKey,
 		"assetRegistry":          assetRegistryPrefix,
 		"messageState":           messageStatePrefix,
-		"fraudRefereeRegistry":   fraudRefereeRegistryPrefix,
 		"validityKeyRegistry":    validityKeyRegistryPrefix,
 		"globalPauseState":       globalPauseStateKey,
 		"domainPauseState":       domainPauseStatePrefix,
@@ -854,7 +848,7 @@ func TestExecutorSet_RoundTrip(t *testing.T) {
 	}
 
 	a := &ExecutorSetMember{PillarName: "pillar-a", ExecutorAddress: addressFromByte(0x01), RegistrationHeight: 10, Status: ExecutorStatusActive}
-	b := &ExecutorSetMember{PillarName: "pillar-b", ExecutorAddress: addressFromByte(0x02), RegistrationHeight: 11, Status: ExecutorStatusLapsed}
+	b := &ExecutorSetMember{PillarName: "pillar-b", ExecutorAddress: addressFromByte(0x02), RegistrationHeight: 11, Status: ExecutorStatusActive}
 	if err := a.Save(memDb); err != nil {
 		t.Fatal(err)
 	}
@@ -1326,7 +1320,7 @@ func TestExportedVariableNames_DecodeEntries(t *testing.T) {
 
 	t.Run("DomainRecord", func(t *testing.T) {
 		store := newDb()
-		in := &DomainRecord{DomainRecordKey: DomainRecordKey{DomainId: 7}, StfSpecHash: h, MinExecutors: 1, Status: DomainStatusPaused, ProfileConfig: []byte{}, ChainBinding: []byte{}, ValueCaps: []byte{}}
+		in := &DomainRecord{DomainRecordKey: DomainRecordKey{DomainId: 7}, StfSpecHash: h, MinExecutors: 1, Status: DomainStatusPaused, ProfileConfig: []byte{}, ChainBinding: []byte{}}
 		if err := in.Save(store); err != nil {
 			t.Fatal(err)
 		}
