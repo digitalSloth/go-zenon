@@ -3,6 +3,7 @@
     "GenesisFile": "/root/.znn/genesis.json",
     "LogLevel": "info",
     "Name": "devnet-rpc",
+    "StateTreeArchive": true,
     "Net": {
         "BootstrapPeers": [
             "/ip4/172.30.0.10/tcp/35995/p2p/16Uiu2HAmRe2RazMPxYEV1A8Vs7LbVfNVMqBdiw7zgSkBLB3E2vQv",
