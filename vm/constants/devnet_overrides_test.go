@@ -22,4 +22,10 @@ func TestDefaultBuildHasNoDevnetOverrides(t *testing.T) {
 	if want := uint64(constants.MomentumsPerEpoch); constants.WithdrawalDelayMin != want {
 		t.Errorf("WithdrawalDelayMin is %d, want %d", constants.WithdrawalDelayMin, want)
 	}
+	if want := uint64(constants.MomentumsPerEpoch); constants.FeeEpochMomentums != want {
+		t.Errorf("FeeEpochMomentums is %d, want %d", constants.FeeEpochMomentums, want)
+	}
+	if want := uint64(constants.MomentumsPerHour * 5 / 6); constants.UpdateMinNumMomentums != want {
+		t.Errorf("UpdateMinNumMomentums is %d, want %d", constants.UpdateMinNumMomentums, want)
+	}
 }
