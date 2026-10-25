@@ -138,21 +138,21 @@
                 "name": "dynamic-plasma",
                 "description": "Activates Dynamic Plasma",
                 "activated": true,
-                "enforcementHeight": 30
+                "enforcementHeight": 0
             },
             {
                 "id": "0000000000000000000000000000000000000000000000000000000000000003",
                 "name": "merkle-state-root",
                 "description": "Activates the Merkle state root",
                 "activated": true,
-                "enforcementHeight": 40
+                "enforcementHeight": 0
             },
             {
                 "id": "0000000000000000000000000000000000000000000000000000000000000004",
                 "name": "offchain-execution",
                 "description": "Activates the Settlement contract",
                 "activated": true,
-                "enforcementHeight": 50
+                "enforcementHeight": 0
             }
         ]
     },

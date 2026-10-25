@@ -45,6 +45,10 @@ var (
 	// pre-mainnet; finalize before mainnet
 	WithdrawalDelayMax = uint64(MomentumsPerEpoch * 14)
 
+	// FeeEpochMomentums is the length of a Settlement fee epoch in
+	// momentum heights.
+	FeeEpochMomentums = uint64(MomentumsPerEpoch)
+
 	// MaxBatchWithdrawal floor/ceiling per (domain, asset).
 	// Non-zero floor; ceiling is a pre-mainnet placeholder that also sizes the bond.
 	MaxBatchWithdrawalFloor = big.NewInt(1)

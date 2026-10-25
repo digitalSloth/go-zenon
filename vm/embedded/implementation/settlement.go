@@ -742,7 +742,7 @@ func activeExecutorPillar(storage db.DB, activePillars []*definition.PillarInfo,
 }
 
 func feeEpochOf(height uint64) uint64 {
-	return height / uint64(constants.MomentumsPerEpoch)
+	return height / constants.FeeEpochMomentums
 }
 
 // accrueBatchFees adds the fees of the batch's assigned-index records to
@@ -799,7 +799,7 @@ func settleNextFeeEpoch(storage db.DB, height uint64, activePillars []*definitio
 	} else if err != nil {
 		return nil, err
 	}
-	if height < (head.Epoch+1)*uint64(constants.MomentumsPerEpoch) || height < head.FinalityHeight {
+	if height < (head.Epoch+1)*constants.FeeEpochMomentums || height < head.FinalityHeight {
 		return nil, nil
 	}
 	paused, err := definition.IsRelayPausedAnywhere(storage)

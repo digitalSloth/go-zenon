@@ -26,4 +26,10 @@ func TestDevnetBuildOverrides(t *testing.T) {
 	if constants.WithdrawalDelayMin != 30 {
 		t.Errorf("WithdrawalDelayMin is %d, want 30", constants.WithdrawalDelayMin)
 	}
+	if constants.FeeEpochMomentums != 60 {
+		t.Errorf("FeeEpochMomentums is %d, want 60", constants.FeeEpochMomentums)
+	}
+	if constants.UpdateMinNumMomentums != 30 {
+		t.Errorf("UpdateMinNumMomentums is %d, want 30", constants.UpdateMinNumMomentums)
+	}
 }
