@@ -65,14 +65,16 @@ an activated spork between restarts).
 
 ## Devnet build
 
-The devnet image builds `znnd` with the `devnet` build tag (`go build -tags devnet` in `docker/devnet/Dockerfile`, which `docker-compose.yml` builds). The tag compiles two files that change four values:
+The devnet image builds `znnd` with the `devnet` build tag (`go build -tags devnet` in `docker/devnet/Dockerfile`, which `docker-compose.yml` builds). The tag compiles two files that change six values:
 
 - `common/types/address_devnet.go` makes dev address index 1 (`z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d`) the network admin, the only address that may call the Settlement contract's admin methods.
-- `vm/constants/embedded_devnet.go` shortens the administrator delay to 12 momenta and the soft delay to 6 momenta (2 epochs and 1 epoch on mainnet), so a two-step admin call completes in minutes. It also sets the minimum withdrawal delay to 30 momenta (1 epoch on mainnet), so a devnet batch finalizes about 5 minutes after acceptance.
+- `vm/constants/embedded_devnet.go` shortens the administrator delay to 12 momenta and the soft delay to 6 momenta (2 epochs and 1 epoch on mainnet), so a two-step admin call completes in minutes. It also sets the minimum withdrawal delay to 30 momenta (1 epoch on mainnet), so a devnet batch finalizes about 5 minutes after acceptance. A Settlement fee epoch lasts 60 momenta (1 day on mainnet), and embedded contract updates run at most every 30 momenta (300 on mainnet), so a fee epoch settles about 15 minutes after it starts. Pillars send up to 10 times more update blocks than on mainnet.
 
 The genesis activates the Settlement contract with the `offchain-execution` spork at height 50, after `merkle-state-root` at 40.
 
 A build without the tag, such as `make znnd`, keeps the mainnet admin and delays; `TestDefaultBuildHasNoDevnetOverrides` in `vm/constants` checks this. The index 1 key derives from the public devnet mnemonic below: never run a `devnet` build on any other network.
+
+The rpc node runs as an archive node (`StateTreeArchive` in `docker/devnet/rpc/config.json`), so it serves state proofs at every height and its state tree grows with every momentum. The pillars and the observer prune as usual.
 
 ## Sync node (late joiner)
 
