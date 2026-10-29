@@ -70,7 +70,7 @@ The devnet image builds `znnd` with the `devnet` build tag (`go build -tags devn
 - `common/types/address_devnet.go` makes dev address index 1 (`z1qq6eg8n43g032hanpsfp02qcdmv7zfj3y2lt5d`) the network admin, the only address that may call the Settlement contract's admin methods.
 - `vm/constants/embedded_devnet.go` shortens the administrator delay to 12 momenta and the soft delay to 6 momenta (2 epochs and 1 epoch on mainnet), so a two-step admin call completes in minutes. It also sets the minimum withdrawal delay to 30 momenta (1 epoch on mainnet), so a devnet batch finalizes about 5 minutes after acceptance. A Settlement fee epoch lasts 60 momenta (1 day on mainnet), and embedded contract updates run at most every 30 momenta (300 on mainnet), so a fee epoch settles about 15 minutes after it starts. Pillars send up to 10 times more update blocks than on mainnet.
 
-The genesis activates the Settlement contract with the `offchain-execution` spork at height 50, after `merkle-state-root` at 40.
+The genesis enforces the `merkle-state-root` spork and the `offchain-execution` spork, which activates the Settlement contract, from height 0.
 
 A build without the tag, such as `make znnd`, keeps the mainnet admin and delays; `TestDefaultBuildHasNoDevnetOverrides` in `vm/constants` checks this. The index 1 key derives from the public devnet mnemonic below: never run a `devnet` build on any other network.
 
@@ -136,6 +136,16 @@ make devnet-down       && make devnet-up        # full wipe — whole devnet, in
 | Sync node HTTP JSON | `http://localhost:35999` (only while activated) |
 | Sync node WebSocket | `ws://localhost:36001` (only while activated) |
 
+### Host interfaces
+
+Every published port binds to `127.0.0.1`, so only the Docker host can reach the devnet. The nodes accept any CORS origin and the devnet keys are public, so a port open on a shared network lets any host on it read and publish to the devnet.
+
+To reach the devnet from another machine, bind every published port to all interfaces with `DEVNET_BIND_ADDRESS`:
+
+```sh
+DEVNET_BIND_ADDRESS=0.0.0.0 make devnet-up
+```
+
 ## Explorer
 
 The `explorer` service runs the static
@@ -166,11 +176,12 @@ overwrites stale explorer settings. This keeps a browser that was previously
 pointed at another Zenon node from silently showing balances from the wrong
 network.
 
-If you open the explorer from another machine, set the RPC endpoint to a URL
-that machine can reach:
+If you open the explorer from another machine, bind the ports to all interfaces
+(see [Host interfaces](#host-interfaces)) and set the RPC endpoint to a URL that
+machine can reach:
 
 ```sh
-EXPLORER_DEFAULT_ENDPOINT=http://YOUR_DOCKER_HOST:35997 make devnet-up
+DEVNET_BIND_ADDRESS=0.0.0.0 EXPLORER_DEFAULT_ENDPOINT=http://YOUR_DOCKER_HOST:35997 make devnet-up
 ```
 
 After changing `EXPLORER_DEFAULT_ENDPOINT`, rebuild/recreate the explorer:
