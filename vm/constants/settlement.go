@@ -57,14 +57,16 @@ var (
 
 	// MaxInputGas is the ceiling on a CallL2 or Deposit plasma_limit, and so on the
 	// L2 gas budget one input can authorize. It is sized from the batch rather than
-	// the input: an honest executor's worst case is MaxBatchInputs * MaxInputGas.
+	// the input: an honest executor's worst case is MaxBatchInputs * MaxInputGas,
+	// which at this value fits the 60 s batch budget on the reference executor
+	// hardware.
 	//
 	// It stays below math.MaxInt64 so every admissible budget fits a signed 64-bit
 	// metering ledger, which is what lets the runtime forbid clamping: a budget it
 	// cannot represent is one Settlement would not have admitted.
 	//
 	// pre-mainnet; finalize before mainnet
-	MaxInputGas = uint64(1_000_000_000)
+	MaxInputGas = uint64(100_000_000)
 
 	// Reserved for MINTED custody, symmetric to MaxBatchWithdrawal. Nothing reads
 	// it while ESCROW is the only custody mode.
