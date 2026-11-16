@@ -148,7 +148,7 @@
                 "enforcementHeight": 0
             },
             {
-                "id": "0000000000000000000000000000000000000000000000000000000000000004",
+                "id": "0000000000000000000000000000000000000000000000000000000000000005",
                 "name": "offchain-execution",
                 "description": "Activates the Settlement contract",
                 "activated": true,

@@ -117,7 +117,7 @@ var (
 	// Tests and devnet override ImplementedSporksMap at runtime with the
 	// locally-generated hash (see vm/embedded/tests/settlement_test.go for the
 	// existing pattern).
-	OffchainExecutionSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000004")
+	OffchainExecutionSpork = NewImplementedSpork("0000000000000000000000000000000000000000000000000000000000000005")
 
 	// ImplementedSporksMap is the set of spork IDs this build knows
 	// how to enforce. After every momentum insertion the momentum pool
